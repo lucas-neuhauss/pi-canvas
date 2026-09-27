@@ -34,6 +34,7 @@ There is no `.xcodeproj` and no `Package.swift`.
 | `⌘O` | Choose the folder new nodes start in |
 | `⌘+` / `⌘-` / `⌘0` | Zoom in / out / actual size |
 | `⌘9` | Zoom to fit every node |
+| `⌘J` | Jump to the next agent that needs you (pans to it if off-screen) |
 | `Delete` | Close the selected node (when the canvas, not a terminal, has focus) |
 | `⌘C` / `⌘V` / `⌘A` | Copy / paste / select all, routed to the focused terminal |
 
@@ -65,10 +66,12 @@ signal:
 
 ![Agent status](docs/screenshot-agent-status.png)
 
-When a node lands on `needs you` while PiCanvas is not the active app, the Dock
-icon bounces once. That is the whole notification design: a busy canvas stays
-quiet, and a finished one gets a nudge. Nothing is shown for `thinking` or tool
-states, because those do not need a human.
+When a node lands on `needs you` it is counted in the status bar (`1 agent needs
+ you — ⌘J`) and, if PiCanvas is not the active app, the Dock icon bounces once.
+`⌘J` cycles through the nodes that want a human, panning to bring them on screen.
+That is the whole notification design: a busy canvas stays quiet, and a finished
+one gets a nudge. Nothing is shown for `thinking` or tool states, because those
+do not need a human.
 
 ## How it works
 
@@ -128,9 +131,9 @@ to iterate on and has no external moving parts.
 ## Testing
 
 ```sh
-# 82 checks: coordinate maths, zoom anchoring, drag, resize, delete,
+# 93 checks: coordinate maths, zoom anchoring, drag, resize, delete,
 # persistence round-trip, process launch, session binding, the agent status
-# state machine, and two real-PTY tests
+# state machine, the needs-you indicator and jump, and two real-PTY tests
 ./build/PiCanvas.app/Contents/MacOS/PiCanvas --self-test
 
 # Render a window with two nodes to PNG without a display server
@@ -167,6 +170,12 @@ pi agent status watcher
   ok   a user message means the agent is working
   ok   a pending tool call names the tool (got bash)
   ok   a finished run means the agent needs you
+
+agent attention and jump
+  ok   only the finished agent asks for attention (got 1)
+  ok   the running node names the tool it is using
+  ok   jump pans to bring an off-screen node into view
+  ok   the target node is on screen after the jump
 ```
 
 ## State

@@ -122,6 +122,7 @@ enum SelfTest {
         testZOrder(canvas: canvas, controller: controller, checker: checker)
         testPiSessionBinding(checker: checker)
         testAgentStatusWatcher(checker: checker)
+        testAttentionAndJump(checker: checker)
         testTerminalRoundTrip(checker: checker)
         testResizeReflow(checker: checker)
 
@@ -510,6 +511,119 @@ enum SelfTest {
         )
 
         watcher.stop()
+        try? FileManager.default.removeItem(at: root)
+    }
+
+    /// The whole agent-awareness chain: transcripts on disk → node status pills →
+    /// the "needs you" count → jumping to the node that wants a human.
+    private static func testAttentionAndJump(checker: Checker) {
+        print("\nagent attention and jump")
+
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("picanvas-attention-\(UUID().uuidString)", isDirectory: true)
+        let cwd = "/Users/someone/Attention Project"
+        let directory = PiSessionWatcher.sessionDirectory(for: cwd, under: root)
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+
+        /// Writes a transcript whose final entry produces the given state.
+        func writeTranscript(sessionID: String, finished: Bool) {
+            let file = directory.appendingPathComponent("2026-01-01T00-00-00-000Z_\(sessionID).jsonl")
+            let stamp = "2026-01-01T00:00:00.000Z"
+            let lines = [
+                "{\"type\":\"session\",\"version\":3,\"id\":\"\(sessionID)\",\"timestamp\":\"\(stamp)\",\"cwd\":\"\(cwd)\"}",
+                "{\"type\":\"message\",\"id\":\"u1\",\"parentId\":null,\"timestamp\":\"\(stamp)\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"go\"}]}}",
+                finished
+                    ? "{\"type\":\"message\",\"id\":\"a1\",\"parentId\":\"u1\",\"timestamp\":\"\(stamp)\",\"message\":{\"role\":\"assistant\",\"stopReason\":\"stop\",\"content\":[{\"type\":\"text\",\"text\":\"done\"}]}}"
+                    : "{\"type\":\"message\",\"id\":\"a1\",\"parentId\":\"u1\",\"timestamp\":\"\(stamp)\",\"message\":{\"role\":\"assistant\",\"stopReason\":\"toolUse\",\"content\":[{\"type\":\"toolCall\",\"name\":\"bash\",\"arguments\":{}}]}}"
+            ]
+            try? lines.joined(separator: "\n").appending("\n").write(to: file, atomically: true, encoding: .utf8)
+        }
+
+        let finishedSession = "aaaa0000-1111-4222-8333-444455556666"
+        let busySession = "bbbb0000-1111-4222-8333-444455556666"
+        writeTranscript(sessionID: finishedSession, finished: true)
+        writeTranscript(sessionID: busySession, finished: false)
+
+        // The node that wants attention sits far off-screen, so jumping must pan.
+        let finishedNode = NodeSpec(
+            kind: .pi,
+            worldFrame: CGRect(x: 5000, y: 0, width: 600, height: 400),
+            workingDirectory: cwd,
+            executable: "/bin/zsh",
+            arguments: ["-lc", "true"],
+            sessionID: finishedSession
+        )
+        let busyNode = NodeSpec(
+            kind: .pi,
+            worldFrame: CGRect(x: 0, y: 0, width: 600, height: 400),
+            workingDirectory: cwd,
+            executable: "/bin/zsh",
+            arguments: ["-lc", "true"],
+            sessionID: busySession
+        )
+
+        let layoutURL = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("picanvas-attention-\(UUID().uuidString).json")
+        let store = LayoutStore(fileURL: layoutURL)
+        store.saveNow(LayoutFile(
+            zoom: 1,
+            panX: 0,
+            panY: 0,
+            lastWorkingDirectory: cwd,
+            nodes: [busyNode, finishedNode]
+        ))
+
+        let canvas = CanvasView(frame: CGRect(x: 0, y: 0, width: 1200, height: 800))
+        let window = NSWindow(contentRect: canvas.frame, styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentView = canvas
+        window.makeKeyAndOrderFront(nil)
+
+        let controller = CanvasController(canvas: canvas, store: store)
+        controller.sessionsRoot = root
+        controller.contentFactory = { _ in RecordingContent() }
+        controller.restore()
+
+        checker.check(
+            waitUntil(timeout: 5) { controller.agentsNeedingAttention == [finishedNode.id] },
+            "only the finished agent asks for attention (got \(controller.agentsNeedingAttention.count))"
+        )
+        checker.equal(
+            canvas.nodeView(withID: finishedNode.id)?.statusText,
+            "needs you",
+            "the finished node shows needs-you"
+        )
+        checker.equal(
+            canvas.nodeView(withID: busyNode.id)?.statusText,
+            "bash",
+            "the running node names the tool it is using"
+        )
+        checker.equal(
+            canvas.nodeView(withID: finishedNode.id)?.statusKind,
+            .needsAttention,
+            "the pill is highlighted"
+        )
+
+        let panBefore = canvas.pan
+        let jumped = controller.jumpToNextAgentNeedingAttention()
+        checker.equal(jumped, finishedNode.id, "jump targets the agent that needs you")
+        checker.equal(canvas.focusedNodeID, finishedNode.id, "jump focuses that node")
+        checker.check(canvas.pan != panBefore, "jump pans to bring an off-screen node into view")
+        checker.check(
+            canvas.visibleWorldRect.intersects(finishedNode.worldFrame),
+            "the target node is on screen after the jump"
+        )
+        checker.equal(
+            controller.jumpToNextAgentNeedingAttention(),
+            finishedNode.id,
+            "cycling with a single candidate stays on it"
+        )
+
+        // Closing the node must drop it from the attention list.
+        controller.close(nodeID: finishedNode.id)
+        checker.check(controller.agentsNeedingAttention.isEmpty, "closing a node clears its attention")
+        checker.check(controller.jumpToNextAgentNeedingAttention() == nil, "nothing to jump to once it is closed")
+
+        window.close()
         try? FileManager.default.removeItem(at: root)
     }
 

@@ -85,7 +85,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         mainView.statusBar.update(
             nodeCount: controller.nodeCount,
             zoom: controller.zoom,
-            workingDirectory: CanvasController.abbreviate(controller.currentWorkingDirectory)
+            workingDirectory: CanvasController.abbreviate(controller.currentWorkingDirectory),
+            needingAttention: controller.agentsNeedingAttention.count
         )
         let count = controller.nodeCount
         window.title = count == 0 ? "PiCanvas" : "PiCanvas — \(count) node\(count == 1 ? "" : "s")"
@@ -116,12 +117,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     @objc private func zoomActual(_ sender: Any?) { controller.resetZoom() }
     @objc private func zoomFit(_ sender: Any?) { controller.zoomToFit() }
 
+    @objc private func jumpToNextAgent(_ sender: Any?) {
+        controller.jumpToNextAgentNeedingAttention()
+    }
+
     // MARK: - Menu validation
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         switch menuItem.action {
         case #selector(closeNode(_:)), #selector(zoomFit(_:)):
             return (controller?.nodeCount ?? 0) > 0
+        case #selector(jumpToNextAgent(_:)):
+            return !(controller?.agentsNeedingAttention.isEmpty ?? true)
         default:
             return true
         }
@@ -255,6 +262,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         let zoomFitItem = NSMenuItem(title: "Zoom to Fit", action: #selector(zoomFit(_:)), keyEquivalent: "9")
         zoomFitItem.target = self
         viewMenu.addItem(zoomFitItem)
+
+        viewMenu.addItem(.separator())
+
+        let jumpItem = NSMenuItem(
+            title: "Next Agent Needing Attention",
+            action: #selector(jumpToNextAgent(_:)),
+            keyEquivalent: "j"
+        )
+        jumpItem.target = self
+        viewMenu.addItem(jumpItem)
 
         // Window
         let windowMenuItem = NSMenuItem()

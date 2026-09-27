@@ -141,13 +141,21 @@ final class StatusBarView: NSView {
         NSRect(x: 0, y: 0, width: bounds.width, height: 1).fill()
     }
 
-    func update(nodeCount: Int, zoom: CGFloat, workingDirectory: String) {
-        if nodeCount == 0 {
-            statusLabel.stringValue = "Empty canvas — ⌘T terminal, ⌘P pi agent"
-        } else if nodeCount == 1 {
-            statusLabel.stringValue = "1 node"
+    func update(nodeCount: Int, zoom: CGFloat, workingDirectory: String, needingAttention: Int = 0) {
+        if needingAttention > 0 {
+            statusLabel.stringValue = needingAttention == 1
+                ? "1 agent needs you — ⌘J"
+                : "\(needingAttention) agents need you — ⌘J"
+            statusLabel.textColor = NodeStatusKind.needsAttention.colors.text
         } else {
-            statusLabel.stringValue = "\(nodeCount) nodes"
+            statusLabel.textColor = NSColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.72)
+            if nodeCount == 0 {
+                statusLabel.stringValue = "Empty canvas — ⌘T terminal, ⌘P pi agent"
+            } else if nodeCount == 1 {
+                statusLabel.stringValue = "1 node"
+            } else {
+                statusLabel.stringValue = "\(nodeCount) nodes"
+            }
         }
         pathLabel.stringValue = workingDirectory
         zoomLabel.stringValue = "\(Int((zoom * 100).rounded()))%"

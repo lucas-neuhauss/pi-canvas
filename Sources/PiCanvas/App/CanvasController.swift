@@ -19,6 +19,13 @@ final class CanvasController: NSObject {
     /// the terminal implementation.
     var contentFactory: ((NodeSpec) -> AgentContent)?
 
+    /// Where pi keeps its session transcripts. Overridable so tests can drive the
+    /// agent-status chain without touching the user's real sessions.
+    var sessionsRoot: URL?
+
+    /// Nodes whose agent has finished a run and is waiting for a human.
+    private(set) var agentsNeedingAttention: [UUID] = []
+
     /// Directory new nodes are created in.
     private(set) var defaultWorkingDirectory: String = ProcessResolver.launchWorkingDirectory
 
@@ -224,6 +231,7 @@ final class CanvasController: NSObject {
         guard let node = canvas.nodeView(withID: nodeID) else { return }
         watchers[nodeID]?.stop()
         watchers[nodeID] = nil
+        agentsNeedingAttention.removeAll { $0 == nodeID }
         contents[nodeID]?.terminate()
         contents[nodeID] = nil
         canvas.removeNodeView(node)
@@ -261,7 +269,8 @@ final class CanvasController: NSObject {
         let id = spec.id
         let watcher = PiSessionWatcher(
             workingDirectory: spec.workingDirectory,
-            sessionID: sessionID
+            sessionID: sessionID,
+            sessionsRoot: sessionsRoot
         ) { [weak self] state in
             self?.apply(agentState: state, to: id)
         }
@@ -276,6 +285,8 @@ final class CanvasController: NSObject {
         node.statusText = state.displayText
         node.statusKind = state.statusKind
 
+        updateAttentionList(nodeID: nodeID, state: state)
+
         // An agent that has finished and wants a human should get attention even
         // if the user is looking at something else. A single Dock bounce is a
         // signal, not a nuisance.
@@ -283,6 +294,38 @@ final class CanvasController: NSObject {
             NSApp.requestUserAttention(.informationalRequest)
         }
         onStateChange?()
+    }
+
+    private func updateAttentionList(nodeID: UUID, state: PiAgentState) {
+        let needsAttention = (state == .waitingForYou)
+        let alreadyListed = agentsNeedingAttention.contains(nodeID)
+        if needsAttention && !alreadyListed {
+            agentsNeedingAttention.append(nodeID)
+        } else if !needsAttention && alreadyListed {
+            agentsNeedingAttention.removeAll { $0 == nodeID }
+        }
+    }
+
+    // MARK: - Navigation
+
+    /// Cycles to the next agent that wants a human, revealing it if it is
+    /// off-screen. This is the counterpart to the status pill: the canvas tells
+    /// you who needs you, this takes you there.
+    @discardableResult
+    func jumpToNextAgentNeedingAttention() -> UUID? {
+        let candidates = agentsNeedingAttention.filter { canvas.nodeView(withID: $0) != nil }
+        guard !candidates.isEmpty else { return nil }
+
+        let ordered = candidates.sorted()
+        var target = ordered[0]
+        if let current = canvas.focusedNodeID, let index = ordered.firstIndex(of: current) {
+            target = ordered[(index + 1) % ordered.count]
+        }
+        if let node = canvas.nodeView(withID: target) {
+            reveal(node.worldFrame)
+            canvas.select(node, focusContent: true)
+        }
+        return target
     }
 
     // MARK: - Viewport
