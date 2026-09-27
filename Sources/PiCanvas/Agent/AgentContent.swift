@@ -29,6 +29,11 @@ protocol AgentContent: AnyObject {
     /// Show or hide the focused appearance.
     func setFocused(_ focused: Bool)
 
+    /// Scale the rendered content. The canvas zoom drives this so text grows and
+    /// shrinks with the canvas; a node's *size* is what changes how much content
+    /// it shows.
+    func setContentScale(_ scale: CGFloat)
+
     // MARK: Diagnostics
 
     /// Last grid size the terminal reported, or `(0, 0)` when unknown.
@@ -43,6 +48,7 @@ protocol AgentContent: AnyObject {
 
 extension AgentContent {
     var reportedGrid: (cols: Int, rows: Int) { (0, 0) }
+    func setContentScale(_ scale: CGFloat) {}
     var supportsScrollbackSnapshot: Bool { false }
     func snapshotScrollback() -> Data? { nil }
     func restoreScrollback(_ data: Data) {}

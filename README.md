@@ -38,9 +38,10 @@ There is no `.xcodeproj` and no `Package.swift`.
 | `Delete` | Close the selected node (when the canvas, not a terminal, has focus) |
 | `⌘C` / `⌘V` / `⌘A` | Copy / paste / select all, routed to the focused terminal |
 
-Mouse: two-finger scroll pans, pinch zooms, `⌘`+scroll zooms, drag a title bar to
-move a node, drag the bottom-right grip to resize, click anywhere in a node to
-focus it and raise it.
+Mouse: two-finger scroll pans (content follows your fingers, like any other
+canvas app), pinch zooms, `⌘`+scroll zooms, drag a title bar to move a node,
+drag **any border or corner** to resize (the cursor changes and the grabbed
+border lights up), click `×` or anywhere in a node to focus it and raise it.
 
 ## Agent awareness
 
@@ -114,13 +115,17 @@ Sources/PiCanvas/
 
 ### Three design decisions worth knowing
 
-**Zoom resizes the view; it never transforms it.** Nodes hold a world-space
-frame and the canvas computes a screen frame from it
-(`screen = world * zoom + pan`). A `CALayer` transform would be two lines of
-code and would make terminal text blurry and its mouse coordinates lie. Instead
-the terminal always renders at native 1:1 pixels, and zooming in means the node
-occupies more pixels, which means more columns and rows. Node chrome is drawn in
-constant screen pixels so it stays legible at every zoom.
+**Zoom scales glyphs; resizing changes content.** Canvas zoom multiplies the
+terminal font size, so zooming out makes nodes smaller *and* their text smaller —
+the whole canvas becomes a readable map instead of a grid of fixed-size text in
+shrinking boxes. Node chrome scales with it, clamped so title bars stay usable.
+Because the font and the node's pixel size scale together, the grid (columns ×
+rows) stays essentially constant while zooming; changing how much content a node
+shows is what resizing it is for.
+
+The alternative — a `CALayer` transform — would be two lines of code and would
+scale a bitmap, making text mushy. Scaling the *font* keeps every glyph rendered
+natively at its true size, so it stays crisp at 20% and at 300%.
 
 **The canvas never imports the terminal library.** `AgentContent` is the seam;
 `TerminalContentFactory` is the only place that knows the terminal exists. That
@@ -145,10 +150,10 @@ to iterate on and has no external moving parts.
 ## Testing
 
 ```sh
-# 117 checks: coordinate maths, zoom anchoring, drag, resize, delete,
-# persistence round-trip, process launch, session binding, the agent status
-# state machine, the needs-you indicator and jump, scrollback snapshot/restore,
-# and three real-PTY tests
+# 128 checks: coordinate maths, zoom anchoring, drag, resize from every border,
+# delete, persistence round-trip, process launch, session binding, the agent
+# status state machine, the needs-you indicator and jump, scrollback
+# snapshot/restore, zoom-vs-resize behaviour, and three real-PTY tests
 ./build/PiCanvas.app/Contents/MacOS/PiCanvas --self-test
 
 # Render a window with two nodes to PNG without a display server
@@ -177,8 +182,10 @@ terminal round trip (real PTY)
   ok   terminate() reaps the process
 
 resize reflow (real PTY)
-  ok   growing the node gives the PTY a bigger grid (65x21 → 130x42)
-  ok   shrinking the node reduces the grid (130 → 52)
+  ok   growing the node gives the PTY a bigger grid (69x21 → 138x42)
+  ok   shrinking the node reduces the grid (138 → 56)
+  ok   zooming out shrinks the glyphs (12.5pt → 6.25pt)
+  ok   zooming out keeps roughly the same content (cols 138 → 130)
 
 pi agent status watcher
   ok   session directory resolves symlinks the way pi does

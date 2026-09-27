@@ -30,6 +30,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         window.minSize = NSSize(width: 760, height: 500)
         window.appearance = NSAppearance(named: .darkAqua)
         window.tabbingMode = .disallowed
+        window.acceptsMouseMovedEvents = true
         window.contentView = mainView
         window.setFrameAutosaveName("PiCanvasMainWindow")
         window.center()

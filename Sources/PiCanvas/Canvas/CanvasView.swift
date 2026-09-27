@@ -37,8 +37,8 @@ final class CanvasView: NSView {
     private(set) var zoom: CGFloat = 1
     private(set) var pan: CGPoint = .zero
 
-    var minZoom: CGFloat = 0.25
-    var maxZoom: CGFloat = 2.5
+    var minZoom: CGFloat = 0.2
+    var maxZoom: CGFloat = 3.0
 
     private(set) var nodeViews: [NodeFrameView] = []
     private(set) var selectedNodeID: UUID?
@@ -252,11 +252,20 @@ final class CanvasView: NSView {
 
     /// Recomputes every node's screen frame. Called after any zoom/pan/frame change.
     func layoutNodes() {
+        let chromeScale = CanvasView.chromeScale(forZoom: zoom)
         for node in nodeViews {
+            node.chromeScale = chromeScale
             node.frame = screenRect(fromWorld: node.worldFrame).integral
             node.needsLayout = true
         }
         needsDisplay = true
+    }
+
+    /// Node chrome tracks zoom, but only within a range where it stays usable:
+    /// title bars and buttons at 20% zoom would otherwise be unreadable specks,
+    /// and at 300% they would eat the node.
+    static func chromeScale(forZoom zoom: CGFloat) -> CGFloat {
+        min(max(zoom, 0.6), 1.5)
     }
 
     // MARK: - Events
@@ -268,7 +277,7 @@ final class CanvasView: NSView {
             let factor = exp(-event.scrollingDeltaY * 0.012)
             setZoom(zoom * factor, anchorScreen: location)
         } else {
-            panBy(CGPoint(x: -event.scrollingDeltaX, y: -event.scrollingDeltaY))
+            panBy(CGPoint(x: event.scrollingDeltaX, y: event.scrollingDeltaY))
         }
     }
 

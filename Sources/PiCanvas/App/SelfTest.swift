@@ -226,6 +226,37 @@ enum SelfTest {
         checker.close(node.worldFrame.width, NodeMetrics.minWorldWidth, 1, "width clamps to minimum")
         checker.close(node.worldFrame.height, NodeMetrics.minWorldHeight, 1, "height clamps to minimum")
         checker.check(node.worldFrame.width > 0 && node.worldFrame.height > 0, "size stays positive")
+
+        // Every border resizes, not just the bottom-right corner.
+        node.worldFrame = CGRect(x: 400, y: 200, width: 600, height: 400)
+        canvas.layoutNodes()
+
+        let leftEdge = CGPoint(x: node.frame.minX + 3, y: node.frame.midY)
+        drag(canvas: canvas, from: leftEdge, to: CGPoint(x: leftEdge.x + 80, y: leftEdge.y), on: node)
+        checker.close(node.worldFrame.origin.x, 480, 1, "dragging the left edge moves the origin right")
+        checker.close(node.worldFrame.width, 520, 1, "dragging the left edge shrinks the width")
+        checker.close(node.worldFrame.maxX, 1000, 1, "the right edge stays put")
+
+        let topEdge = CGPoint(x: node.frame.midX, y: node.frame.minY + 3)
+        drag(canvas: canvas, from: topEdge, to: CGPoint(x: topEdge.x, y: topEdge.y + 60), on: node)
+        checker.close(node.worldFrame.origin.y, 260, 1, "dragging the top edge moves the origin down")
+        checker.close(node.worldFrame.height, 340, 1, "dragging the top edge shortens the height")
+        checker.close(node.worldFrame.maxY, 600, 1, "the bottom edge stays put")
+
+        let rightEdge = CGPoint(x: node.frame.maxX - 3, y: node.frame.midY)
+        drag(canvas: canvas, from: rightEdge, to: CGPoint(x: rightEdge.x + 100, y: rightEdge.y), on: node)
+        checker.close(node.worldFrame.width, 620, 1, "dragging the right edge grows the width")
+
+        // The top band is thinner than the sides so the title bar stays grabbable:
+        // a little below the very top edge, a drag should move instead of resize.
+        node.worldFrame = CGRect(x: 400, y: 200, width: 600, height: 400)
+        canvas.layoutNodes()
+        let originBefore = node.worldFrame.origin
+        let sizeBefore = node.worldFrame.size
+        let titleGrab = CGPoint(x: node.frame.midX, y: node.frame.minY + 14)
+        drag(canvas: canvas, from: titleGrab, to: CGPoint(x: titleGrab.x + 50, y: titleGrab.y + 30), on: node)
+        checker.close(node.worldFrame.origin.x, originBefore.x + 50, 1, "the title bar still moves the node")
+        checker.close(node.worldFrame.width, sizeBefore.width, 1, "and does not resize it")
     }
 
     private static func testProcessRequest(
@@ -847,6 +878,26 @@ enum SelfTest {
             "shrinking the node reduces the grid (\(wideCols) → \(content.lastReportedCols))"
         )
 
+        // Zoom, by contrast, scales the glyphs and leaves the grid alone: the
+        // font and the pixel size shrink together, which is what makes zooming
+        // out feel like zooming out instead of cropping.
+        window.setContentSize(NSSize(width: 1040, height: 640))
+        _ = waitUntil(timeout: 8) { content.lastReportedCols > 100 }
+        let colsAtFullSize = content.lastReportedCols
+        let fontBefore = content.contentFontSize
+        content.setContentScale(0.5)
+        window.setContentSize(NSSize(width: 520, height: 320))
+        let scaled = waitUntil(timeout: 8) { content.contentFontSize < fontBefore * 0.75 }
+        checker.check(scaled, "zooming out shrinks the glyphs (\(fontBefore)pt → \(content.contentFontSize)pt)")
+        // Cell metrics round to whole pixels, so the grid drifts a few percent;
+        // what matters is that it does not halve (which is what happens when the
+        // font stays fixed while the view shrinks).
+        checker.check(
+            abs(content.lastReportedCols - colsAtFullSize) <= max(6, colsAtFullSize / 10),
+            "zooming out keeps roughly the same content (cols \(colsAtFullSize) → \(content.lastReportedCols))"
+        )
+
+        content.setContentScale(1)
         content.terminate()
         _ = waitUntil(timeout: 6) { false }
         window.close()

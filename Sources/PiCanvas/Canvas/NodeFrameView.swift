@@ -11,6 +11,28 @@ protocol NodeFrameViewDelegate: AnyObject {
     func nodeFrameViewDidTakeFirstResponder(_ node: NodeFrameView)
 }
 
+/// Base sizes for a node's chrome, in screen pixels at 100% zoom. Everything is
+/// multiplied by `NodeFrameView.chromeScale` (driven by canvas zoom) so chrome
+/// tracks zoom without becoming unusable at the extremes.
+enum NodeMetrics {
+    static let titleBarHeight: CGFloat = 26
+    /// The gutter around the terminal. This is deliberately the same width as
+    /// `resizeThickness`: the terminal must never sit underneath a resize band,
+    /// because SwiftTerm claims its whole bounds (I-beam cursor rect plus its own
+    /// tracking area) and would swallow the pointer there. So the visible gutter
+    /// *is* the resize handle.
+    static let contentPadding: CGFloat = 8
+    static let cornerRadius: CGFloat = 10
+    static let closeButtonSize: CGFloat = 16
+    /// How thick the draggable border is for edge resizing.
+    static let resizeThickness: CGFloat = 8
+    /// The top edge sits inside the title bar, so its grab band is thinner.
+    static let topResizeThickness: CGFloat = 6
+    static let minWorldWidth: CGFloat = 240
+    static let minWorldHeight: CGFloat = 150
+    static let contentCornerRadius: CGFloat = 4
+}
+
 /// How a node's status pill is coloured.
 enum NodeStatusKind {
     case idle
@@ -45,21 +67,37 @@ enum NodeStatusKind {
     }
 }
 
-/// Sizes for a node's chrome, in *screen pixels* — deliberately not scaled by
-/// zoom, so title bars and buttons stay usable at every zoom level while the
-/// terminal inside reflows to fill whatever pixel area remains.
-enum NodeMetrics {
-    static let titleBarHeight: CGFloat = 26
-    static let contentPadding: CGFloat = 6
-    static let cornerRadius: CGFloat = 10
-    static let closeButtonSize: CGFloat = 16
-    static let resizeHandleSize: CGFloat = 20
-    static let minWorldWidth: CGFloat = 240
-    static let minWorldHeight: CGFloat = 150
-    static let contentCornerRadius: CGFloat = 4
+/// Which borders of a node a drag is resizing.
+struct ResizeEdge: OptionSet, Equatable {
+    let rawValue: Int
+
+    static let left = ResizeEdge(rawValue: 1 << 0)
+    static let right = ResizeEdge(rawValue: 1 << 1)
+    static let top = ResizeEdge(rawValue: 1 << 2)
+    static let bottom = ResizeEdge(rawValue: 1 << 3)
+
+    var isCorner: Bool {
+        (contains(.left) || contains(.right)) && (contains(.top) || contains(.bottom))
+    }
 }
 
-/// One panel on the canvas: a title bar, a resize grip, and a content view
+/// Sizes derived from the current zoom.
+struct NodeChrome {
+    var scale: CGFloat
+
+    var titleBarHeight: CGFloat { NodeMetrics.titleBarHeight * scale }
+    var padding: CGFloat { NodeMetrics.contentPadding * scale }
+    var cornerRadius: CGFloat { NodeMetrics.cornerRadius * scale }
+    var closeSize: CGFloat { NodeMetrics.closeButtonSize * scale }
+    var dotDiameter: CGFloat { 7 * scale }
+    var pillHeight: CGFloat { 15 * scale }
+    var titleFontSize: CGFloat { 12 * scale }
+    var subtitleFontSize: CGFloat { 11 * scale }
+    var pillFontSize: CGFloat { 10 * scale }
+    var gripLineWidth: CGFloat { max(1.0, 1.4 * scale) }
+}
+
+/// One panel on the canvas: a title bar, a resize border, and a content view
 /// (the terminal). Holds its own world-space frame; the canvas converts that to
 /// a screen frame on every layout pass.
 final class NodeFrameView: NSView {
@@ -98,6 +136,16 @@ final class NodeFrameView: NSView {
         didSet { if isFocused != oldValue { needsDisplay = true } }
     }
 
+    /// Chrome size multiplier, set by the canvas from the zoom level.
+    var chromeScale: CGFloat = 1 {
+        didSet {
+            guard abs(chromeScale - oldValue) > 0.001 else { return }
+            needsLayout = true
+            needsDisplay = true
+            window?.invalidateCursorRects(for: self)
+        }
+    }
+
     weak var nodeDelegate: NodeFrameViewDelegate?
 
     /// The terminal. Setting it installs it below the chrome.
@@ -114,7 +162,7 @@ final class NodeFrameView: NSView {
     private enum DragMode {
         case none
         case move
-        case resize
+        case resize(ResizeEdge)
         case closeButton
     }
 
@@ -122,6 +170,10 @@ final class NodeFrameView: NSView {
     private var dragStartWorldMouse: CGPoint = .zero
     private var dragStartWorldFrame: CGRect = .zero
     private var didDrag = false
+    private var hoveredEdge: ResizeEdge?
+    private var hoverTrackingArea: NSTrackingArea?
+
+    private var chrome: NodeChrome { NodeChrome(scale: chromeScale) }
 
     // MARK: - Init
 
@@ -131,7 +183,6 @@ final class NodeFrameView: NSView {
         self.kind = kind
         super.init(frame: .zero)
         wantsLayer = true
-        layer?.cornerRadius = NodeMetrics.cornerRadius
         layer?.shadowColor = NSColor.black.cgColor
         layer?.shadowOpacity = 0.45
         layer?.shadowRadius = 9
@@ -148,8 +199,9 @@ final class NodeFrameView: NSView {
     override var isFlipped: Bool { true }
 
     var contentRect: CGRect {
-        let top = NodeMetrics.titleBarHeight + 2
-        let pad = NodeMetrics.contentPadding
+        let chrome = chrome
+        let top = chrome.titleBarHeight + 2
+        let pad = chrome.padding
         let rect = CGRect(
             x: 1 + pad,
             y: top,
@@ -160,46 +212,83 @@ final class NodeFrameView: NSView {
     }
 
     private var closeRect: CGRect {
-        let size = NodeMetrics.closeButtonSize
+        let chrome = chrome
+        let size = chrome.closeSize
         return CGRect(
-            x: bounds.width - NodeMetrics.contentPadding - size,
-            y: (NodeMetrics.titleBarHeight - size) / 2,
+            x: bounds.width - chrome.padding - size,
+            y: (chrome.titleBarHeight - size) / 2,
             width: size,
             height: size
         )
     }
 
-    private var resizeRect: CGRect {
-        let size = NodeMetrics.resizeHandleSize
-        return CGRect(x: bounds.width - size, y: bounds.height - size, width: size, height: size)
-    }
+    /// Which borders the point is close enough to drag. Being within the band of
+    /// two perpendicular borders makes it a corner, which needs no special case.
+    /// The top band is thinner so the title bar stays grabbable for moving.
+    func resizeEdge(at point: CGPoint) -> ResizeEdge? {
+        let edgeThickness = max(NodeMetrics.resizeThickness * chromeScale, 6)
+        let topThickness = max(NodeMetrics.topResizeThickness * chromeScale, 4)
 
-    private func isPointInTitleBar(_ point: CGPoint) -> Bool {
-        point.y <= NodeMetrics.titleBarHeight
+        var edge: ResizeEdge = []
+        if point.x <= edgeThickness { edge.insert(.left) }
+        if point.x >= bounds.width - edgeThickness { edge.insert(.right) }
+        if point.y <= topThickness { edge.insert(.top) }
+        if point.y >= bounds.height - edgeThickness { edge.insert(.bottom) }
+
+        return edge.isEmpty ? nil : edge
     }
 
     override func layout() {
         super.layout()
         contentView?.frame = contentRect
+        layer?.cornerRadius = chrome.cornerRadius
         layer?.shadowPath = CGPath(
             roundedRect: bounds,
-            cornerWidth: NodeMetrics.cornerRadius,
-            cornerHeight: NodeMetrics.cornerRadius,
+            cornerWidth: chrome.cornerRadius,
+            cornerHeight: chrome.cornerRadius,
             transform: nil
         )
     }
 
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let hoverTrackingArea {
+            removeTrackingArea(hoverTrackingArea)
+        }
+        let area = NSTrackingArea(
+            rect: bounds,
+            options: [.mouseMoved, .mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(area)
+        hoverTrackingArea = area
+    }
+
     override func resetCursorRects() {
         super.resetCursorRects()
+        let chrome = chrome
+        let edgeThickness = max(NodeMetrics.resizeThickness * chromeScale, 6)
+        let topThickness = max(NodeMetrics.topResizeThickness * chromeScale, 4)
+
+        // The close button gets a plain arrow, then the resize bands, then the
+        // title bar (minus the close button and the top band) moves the node.
+        addCursorRect(closeRect.insetBy(dx: -2, dy: -2), cursor: .arrow)
+
+        // Every border and corner is draggable, with the matching native cursor.
+        addCursorRect(CGRect(x: 0, y: topThickness, width: edgeThickness, height: max(bounds.height - topThickness - edgeThickness, 1)), cursor: NodeCursor.resize([.left]))
+        addCursorRect(CGRect(x: bounds.width - edgeThickness, y: topThickness, width: edgeThickness, height: max(bounds.height - topThickness - edgeThickness, 1)), cursor: NodeCursor.resize([.right]))
+        addCursorRect(CGRect(x: edgeThickness, y: 0, width: max(bounds.width - edgeThickness * 2, 1), height: topThickness), cursor: NodeCursor.resize([.top]))
+        addCursorRect(CGRect(x: edgeThickness, y: bounds.height - edgeThickness, width: max(bounds.width - edgeThickness * 2, 1), height: edgeThickness), cursor: NodeCursor.resize([.bottom]))
+        addCursorRect(CGRect(x: 0, y: 0, width: edgeThickness, height: topThickness), cursor: NodeCursor.resize([.left, .top]))
+        addCursorRect(CGRect(x: bounds.width - edgeThickness, y: 0, width: edgeThickness, height: topThickness), cursor: NodeCursor.resize([.right, .top]))
+        addCursorRect(CGRect(x: 0, y: bounds.height - edgeThickness, width: edgeThickness, height: edgeThickness), cursor: NodeCursor.resize([.left, .bottom]))
+        addCursorRect(CGRect(x: bounds.width - edgeThickness, y: bounds.height - edgeThickness, width: edgeThickness, height: edgeThickness), cursor: NodeCursor.resize([.right, .bottom]))
+
         addCursorRect(
-            CGRect(x: 0, y: 0, width: max(bounds.width - NodeMetrics.closeButtonSize - 20, 1), height: NodeMetrics.titleBarHeight),
+            CGRect(x: 0, y: topThickness, width: max(bounds.width - chrome.closeSize - chrome.padding * 2, 1), height: max(chrome.titleBarHeight - topThickness, 1)),
             cursor: .openHand
         )
-        if let diagonal = NSCursor.fromSymbol("arrow.up.left.and.arrow.down.right") {
-            addCursorRect(resizeRect, cursor: diagonal)
-        } else {
-            addCursorRect(resizeRect, cursor: .crosshair)
-        }
     }
 
     // MARK: - Canvas helpers
@@ -215,6 +304,24 @@ final class NodeFrameView: NSView {
         return canvas.worldPoint(fromScreen: canvasPoint(for: event))
     }
 
+    // MARK: - Hover
+
+    override func mouseMoved(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        let edge = resizeEdge(at: point)
+        if edge != hoveredEdge {
+            hoveredEdge = edge
+            needsDisplay = true
+        }
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        if hoveredEdge != nil {
+            hoveredEdge = nil
+            needsDisplay = true
+        }
+    }
+
     // MARK: - Mouse interaction
 
     override func mouseDown(with event: NSEvent) {
@@ -222,6 +329,7 @@ final class NodeFrameView: NSView {
         didDrag = false
         nodeDelegate?.nodeFrameViewDidBeginInteraction(self)
 
+        // The close button is small and specific, so it wins over the corner band.
         if closeRect.contains(point) {
             dragMode = .closeButton
             return
@@ -234,9 +342,9 @@ final class NodeFrameView: NSView {
         dragStartWorldMouse = world
         dragStartWorldFrame = worldFrame
 
-        if resizeRect.contains(point) {
-            dragMode = .resize
-        } else if isPointInTitleBar(point) {
+        if let edge = resizeEdge(at: point) {
+            dragMode = .resize(edge)
+        } else if point.y <= chrome.titleBarHeight {
             dragMode = .move
         } else {
             // Clicking the node's padding: select and hand focus to the terminal.
@@ -246,7 +354,7 @@ final class NodeFrameView: NSView {
     }
 
     override func mouseDragged(with event: NSEvent) {
-        guard dragMode == .move || dragMode == .resize, let world = worldPoint(for: event) else { return }
+        guard let world = worldPoint(for: event) else { return }
         let delta = CGPoint(x: world.x - dragStartWorldMouse.x, y: world.y - dragStartWorldMouse.y)
         if abs(delta.x) > 0.5 || abs(delta.y) > 0.5 { didDrag = true }
         guard didDrag else { return }
@@ -258,10 +366,10 @@ final class NodeFrameView: NSView {
                 y: dragStartWorldFrame.origin.y + delta.y
             )
             worldFrame.origin = snap(origin)
-        case .resize:
-            let width = max(dragStartWorldFrame.size.width + delta.x, NodeMetrics.minWorldWidth)
-            let height = max(dragStartWorldFrame.size.height + delta.y, NodeMetrics.minWorldHeight)
-            worldFrame.size = CGSize(width: width.rounded(), height: height.rounded())
+
+        case .resize(let edge):
+            worldFrame = resized(dragStartWorldFrame, by: delta, edges: edge)
+
         default:
             break
         }
@@ -279,15 +387,43 @@ final class NodeFrameView: NSView {
             if closeRect.contains(point) {
                 nodeDelegate?.nodeFrameViewDidRequestClose(self)
             }
-        case .move, .resize:
+        case .move:
             nodeDelegate?.nodeFrameViewDidEndInteraction(self)
-            if !didDrag && mode == .move {
+            if !didDrag {
                 nodeDelegate?.nodeFrameViewDidRequestFocus(self)
             }
+        case .resize:
+            nodeDelegate?.nodeFrameViewDidEndInteraction(self)
         case .none:
             break
         }
         didDrag = false
+    }
+
+    /// Applies a drag to the grabbed borders. The opposite borders stay put, so
+    /// dragging the left edge moves the origin rather than the whole node.
+    private func resized(_ start: CGRect, by delta: CGPoint, edges: ResizeEdge) -> CGRect {
+        var frame = start
+        let minWidth = NodeMetrics.minWorldWidth
+        let minHeight = NodeMetrics.minWorldHeight
+
+        if edges.contains(.right) {
+            frame.size.width = max(start.width + delta.x, minWidth).rounded()
+        }
+        if edges.contains(.bottom) {
+            frame.size.height = max(start.height + delta.y, minHeight).rounded()
+        }
+        if edges.contains(.left) {
+            let width = max(start.width - delta.x, minWidth).rounded()
+            frame.origin.x = (start.maxX - width).rounded()
+            frame.size.width = width
+        }
+        if edges.contains(.top) {
+            let height = max(start.height - delta.y, minHeight).rounded()
+            frame.origin.y = (start.maxY - height).rounded()
+            frame.size.height = height
+        }
+        return frame
     }
 
     /// Keeps dragged nodes on a whole world-unit grid so layouts stay tidy.
@@ -300,17 +436,15 @@ final class NodeFrameView: NSView {
     private let borderIdle = NSColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.10)
     private let borderSelected = NSColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.28)
     private let separatorColor = NSColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.07)
+    private let accentColor = NSColor(srgbRed: 0.42, green: 0.60, blue: 0.98, alpha: 1)
 
     override func draw(_ dirtyRect: NSRect) {
         guard let context = NSGraphicsContext.current?.cgContext else { return }
+        let chrome = chrome
 
-        // The layer already paints the background and the corner radius; we only
-        // draw the border, the title bar contents and the resize grip.
         let borderColor: NSColor
-        var borderWidth: CGFloat = 1
         if isFocused {
             borderColor = NSColor(srgbRed: 0.42, green: 0.60, blue: 0.98, alpha: 0.95)
-            borderWidth = 1
         } else if isSelected {
             borderColor = borderSelected
         } else {
@@ -319,27 +453,28 @@ final class NodeFrameView: NSView {
 
         context.saveGState()
         let borderPath = NSBezierPath(
-            roundedRect: bounds.insetBy(dx: borderWidth / 2, dy: borderWidth / 2),
-            xRadius: NodeMetrics.cornerRadius,
-            yRadius: NodeMetrics.cornerRadius
+            roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5),
+            xRadius: chrome.cornerRadius,
+            yRadius: chrome.cornerRadius
         )
-        borderPath.lineWidth = borderWidth
+        borderPath.lineWidth = 1
         borderColor.setStroke()
         borderPath.stroke()
 
         // Separator under the title bar.
         separatorColor.setFill()
-        NSRect(x: 1, y: NodeMetrics.titleBarHeight, width: bounds.width - 2, height: 1).fill()
+        NSRect(x: 1, y: chrome.titleBarHeight, width: bounds.width - 2, height: 1).fill()
         context.restoreGState()
 
         drawTitleBar()
-        drawResizeGrip()
+        drawResizeAffordances()
     }
 
     private func drawTitleBar() {
-        let dotDiameter: CGFloat = 7
-        let dotX = NodeMetrics.contentPadding + 1
-        let dotY = (NodeMetrics.titleBarHeight - dotDiameter) / 2
+        let chrome = chrome
+        let dotDiameter = chrome.dotDiameter
+        let dotX = chrome.padding + 1
+        let dotY = (chrome.titleBarHeight - dotDiameter) / 2
         let accent = kind.accent
         NSColor(
             srgbRed: CGFloat(accent.0),
@@ -349,57 +484,58 @@ final class NodeFrameView: NSView {
         ).setFill()
         NSBezierPath(ovalIn: NSRect(x: dotX, y: dotY, width: dotDiameter, height: dotDiameter)).fill()
 
-        // Close button: an × whose contrast rises with focus / hover.
+        // Close button: an × whose contrast rises with focus.
         let close = closeRect
         let closeAlpha: CGFloat = isFocused ? 0.55 : 0.3
         NSColor(srgbRed: 1, green: 1, blue: 1, alpha: closeAlpha).setStroke()
         let cross = NSBezierPath()
-        let inset: CGFloat = 4.5
+        let inset = close.width * 0.28
         cross.move(to: CGPoint(x: close.minX + inset, y: close.minY + inset))
         cross.line(to: CGPoint(x: close.maxX - inset, y: close.maxY - inset))
         cross.move(to: CGPoint(x: close.maxX - inset, y: close.minY + inset))
         cross.line(to: CGPoint(x: close.minX + inset, y: close.maxY - inset))
-        cross.lineWidth = 1.4
+        cross.lineWidth = max(1.0, 1.4 * chromeScale)
         cross.stroke()
 
-        // Status pill, if any.
-        var textRightLimit = close.minX - 6
+        var textRightLimit = close.minX - 6 * chromeScale
 
         // Session cost, as quiet dim text before the pill.
         if let costText, !costText.isEmpty {
-            let font = NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .regular)
+            let font = NSFont.monospacedDigitSystemFont(ofSize: chrome.pillFontSize, weight: .regular)
             let attributes: [NSAttributedString.Key: Any] = [
                 .font: font,
                 .foregroundColor: NSColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.40)
             ]
             let size = (costText as NSString).size(withAttributes: attributes)
-            let leftEdge = dotX + dotDiameter + 46
-            if textRightLimit - size.width - 12 > leftEdge {
+            let leftEdge = dotX + dotDiameter + 46 * chromeScale
+            if textRightLimit - size.width - 12 * chromeScale > leftEdge {
                 (costText as NSString).draw(
                     in: CGRect(
                         x: textRightLimit - size.width,
-                        y: (NodeMetrics.titleBarHeight - size.height) / 2,
+                        y: (chrome.titleBarHeight - size.height) / 2,
                         width: size.width,
                         height: size.height
                     ),
                     withAttributes: attributes
                 )
-                textRightLimit -= size.width + 12
+                textRightLimit -= size.width + 12 * chromeScale
             }
         }
+
+        // Status pill, if any.
         if let statusText, !statusText.isEmpty {
-            let font = NSFont.systemFont(ofSize: 10, weight: .medium)
+            let font = NSFont.systemFont(ofSize: chrome.pillFontSize, weight: .medium)
             let colors = statusKind.colors
             let attributes: [NSAttributedString.Key: Any] = [
                 .font: font,
                 .foregroundColor: colors.text
             ]
             let textSize = (statusText as NSString).size(withAttributes: attributes)
-            let pillWidth = textSize.width + 12
-            let pillHeight: CGFloat = 15
+            let pillWidth = textSize.width + 12 * chromeScale
+            let pillHeight = chrome.pillHeight
             let pillRect = CGRect(
                 x: max(textRightLimit - pillWidth, dotX + dotDiameter + 8),
-                y: (NodeMetrics.titleBarHeight - pillHeight) / 2,
+                y: (chrome.titleBarHeight - pillHeight) / 2,
                 width: pillWidth,
                 height: pillHeight
             )
@@ -407,18 +543,23 @@ final class NodeFrameView: NSView {
             colors.background.setFill()
             pillPath.fill()
             (statusText as NSString).draw(
-                in: CGRect(x: pillRect.minX + 6, y: pillRect.minY + 2, width: textSize.width, height: textSize.height),
+                in: CGRect(
+                    x: pillRect.minX + 6 * chromeScale,
+                    y: pillRect.midY - textSize.height / 2,
+                    width: textSize.width,
+                    height: textSize.height
+                ),
                 withAttributes: attributes
             )
-            textRightLimit = pillRect.minX - 8
+            textRightLimit = pillRect.minX - 8 * chromeScale
         }
 
         // Title (and subtitle), truncated to the space left of the pill / close button.
-        let textOriginX = dotX + dotDiameter + 8
+        let textOriginX = dotX + dotDiameter + 8 * chromeScale
         let availableWidth = max(textRightLimit - textOriginX, 10)
 
-        let titleFont = NSFont.systemFont(ofSize: 12, weight: .semibold)
-        let subtitleFont = NSFont.systemFont(ofSize: 11, weight: .regular)
+        let titleFont = NSFont.systemFont(ofSize: chrome.titleFontSize, weight: .semibold)
+        let subtitleFont = NSFont.systemFont(ofSize: chrome.subtitleFontSize, weight: .regular)
         let paragraph = NSMutableParagraphStyle()
         paragraph.lineBreakMode = .byTruncatingTail
 
@@ -433,7 +574,7 @@ final class NodeFrameView: NSView {
         let titleHeight = titleFont.ascender - titleFont.descender
         let titleRect = CGRect(
             x: textOriginX,
-            y: (NodeMetrics.titleBarHeight - titleHeight) / 2,
+            y: (chrome.titleBarHeight - titleHeight) / 2,
             width: availableWidth,
             height: titleHeight
         )
@@ -443,7 +584,7 @@ final class NodeFrameView: NSView {
 
         if !subtitle.isEmpty {
             let usedWidth = min(titleString.size().width, availableWidth)
-            let subtitleGap: CGFloat = 7
+            let subtitleGap = 7 * chromeScale
             let subtitleLeft = textOriginX + usedWidth + subtitleGap
             let remaining = textRightLimit - subtitleLeft
             if remaining > 30 {
@@ -455,7 +596,7 @@ final class NodeFrameView: NSView {
                 let subtitleHeight = subtitleFont.ascender - subtitleFont.descender
                 let subtitleRect = CGRect(
                     x: subtitleLeft,
-                    y: (NodeMetrics.titleBarHeight - subtitleHeight) / 2,
+                    y: (chrome.titleBarHeight - subtitleHeight) / 2,
                     width: remaining,
                     height: subtitleHeight
                 )
@@ -465,21 +606,107 @@ final class NodeFrameView: NSView {
         }
     }
 
-    private func drawResizeGrip() {
-        let rect = resizeRect
-        let alpha: CGFloat = isFocused ? 0.42 : 0.22
-        NSColor(srgbRed: 1, green: 1, blue: 1, alpha: alpha).setStroke()
+    /// Corner brackets on every corner say "drag any edge", and the grabbed
+    /// border lights up on hover so resizing is discoverable.
+    private func drawResizeAffordances() {
+        let chrome = chrome
+        let inset = max(2.5 * chromeScale, 2)
+        let length = max(9 * chromeScale, 7)
+        let lineWidth = chrome.gripLineWidth
+        let radius = max(chrome.cornerRadius - inset, 2)
+
+        // Corner brackets.
+        let corners: [(CGPoint, CGPoint, CGPoint)] = [
+            // top-left
+            (CGPoint(x: inset, y: inset + radius + length), CGPoint(x: inset, y: inset + radius), CGPoint(x: inset + radius + length, y: inset)),
+            // top-right
+            (CGPoint(x: bounds.width - inset - radius - length, y: inset), CGPoint(x: bounds.width - inset - radius, y: inset), CGPoint(x: bounds.width - inset, y: inset + radius + length)),
+            // bottom-left
+            (CGPoint(x: inset, y: bounds.height - inset - radius - length), CGPoint(x: inset, y: bounds.height - inset - radius), CGPoint(x: inset + radius + length, y: bounds.height - inset)),
+            // bottom-right
+            (CGPoint(x: bounds.width - inset - radius - length, y: bounds.height - inset), CGPoint(x: bounds.width - inset - radius, y: bounds.height - inset), CGPoint(x: bounds.width - inset, y: bounds.height - inset - radius - length))
+        ]
+
+        let idleAlpha: CGFloat = isFocused ? 0.34 : 0.20
         let path = NSBezierPath()
-        let step: CGFloat = 4
-        let lines = 3
-        let start = CGPoint(x: rect.maxX - 5, y: rect.maxY - 5)
-        for index in 0..<lines {
-            let offset = CGFloat(index) * step
-            path.move(to: CGPoint(x: start.x - offset, y: start.y))
-            path.line(to: CGPoint(x: start.x, y: start.y - offset))
+        for (start, corner, end) in corners {
+            path.move(to: start)
+            path.line(to: corner)
+            path.line(to: end)
         }
-        path.lineWidth = 1.2
+        path.lineWidth = lineWidth
+        path.lineCapStyle = .round
+        NSColor(srgbRed: 1, green: 1, blue: 1, alpha: idleAlpha).setStroke()
         path.stroke()
+
+        drawHoveredEdgeHighlight()
+    }
+
+    private func drawHoveredEdgeHighlight() {
+        guard let edge = hoveredEdge else { return }
+        let thickness = max(2.5 * chromeScale, 2)
+
+        var rects: [CGRect] = []
+        if edge.contains(.left) {
+            rects.append(CGRect(x: 0, y: 0, width: thickness, height: bounds.height))
+        }
+        if edge.contains(.right) {
+            rects.append(CGRect(x: bounds.width - thickness, y: 0, width: thickness, height: bounds.height))
+        }
+        if edge.contains(.top) {
+            rects.append(CGRect(x: 0, y: 0, width: bounds.width, height: thickness))
+        }
+        if edge.contains(.bottom) {
+            rects.append(CGRect(x: 0, y: bounds.height - thickness, width: bounds.width, height: thickness))
+        }
+
+        accentColor.withAlphaComponent(0.85).setFill()
+        for rect in rects {
+            NSBezierPath(roundedRect: rect, xRadius: thickness / 2, yRadius: thickness / 2).fill()
+        }
+    }
+}
+
+/// Native frame-resize cursors where available, SF Symbol cursors elsewhere.
+enum NodeCursor {
+    static func resize(_ edge: ResizeEdge) -> NSCursor {
+        if #available(macOS 15.0, *) {
+            if let position = position(for: edge) {
+                return NSCursor.frameResize(position: position, directions: [.inward, .outward])
+            }
+        }
+        return fallback(edge)
+    }
+
+    @available(macOS 15.0, *)
+    private static func position(for edge: ResizeEdge) -> NSCursor.FrameResizePosition? {
+        switch (edge.contains(.left), edge.contains(.right), edge.contains(.top), edge.contains(.bottom)) {
+        case (true, _, true, _): return .topLeft
+        case (_, true, true, _): return .topRight
+        case (true, _, _, true): return .bottomLeft
+        case (_, true, _, true): return .bottomRight
+        case (true, _, _, _): return .left
+        case (_, true, _, _): return .right
+        case (_, _, true, _): return .top
+        case (_, _, _, true): return .bottom
+        default: return nil
+        }
+    }
+
+    private static func fallback(_ edge: ResizeEdge) -> NSCursor {
+        let horizontal = edge.contains(.left) || edge.contains(.right)
+        let vertical = edge.contains(.top) || edge.contains(.bottom)
+        if horizontal && vertical {
+            if edge.contains(.top) && edge.contains(.left) {
+                return NSCursor.fromSymbol("arrow.up.left.and.arrow.down.right") ?? .crosshair
+            }
+            if edge.contains(.bottom) && edge.contains(.right) {
+                return NSCursor.fromSymbol("arrow.up.left.and.arrow.down.right") ?? .crosshair
+            }
+            return NSCursor.fromSymbol("arrow.up.right.and.arrow.down.left") ?? .crosshair
+        }
+        if horizontal { return .resizeLeftRight }
+        return .resizeUpDown
     }
 }
 

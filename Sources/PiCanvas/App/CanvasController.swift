@@ -24,6 +24,9 @@ final class CanvasController: NSObject {
     /// agent-status chain without touching the user's real sessions.
     var sessionsRoot: URL?
 
+    /// Last zoom pushed into the terminals, so panning does not re-apply it.
+    private var lastAppliedContentScale: CGFloat = 1
+
     /// Nodes whose agent has finished a run and is waiting for a human.
     private(set) var agentsNeedingAttention: [UUID] = []
 
@@ -188,6 +191,7 @@ final class CanvasController: NSObject {
         let content = contentFactory?(spec) ?? MissingContent()
         contents[spec.id] = content
         wire(content: content, node: node)
+        content.setContentScale(canvas.zoom)
         node.contentView = content.view
         canvas.addNodeView(node)
 
@@ -415,6 +419,13 @@ final class CanvasController: NSObject {
 extension CanvasController: CanvasViewDelegate {
 
     func canvasView(_ canvas: CanvasView, didChangeViewport viewport: CanvasViewport) {
+        // Zoom scales what is inside the nodes, not just their frames.
+        if abs(viewport.zoom - lastAppliedContentScale) > 0.005 {
+            lastAppliedContentScale = viewport.zoom
+            for content in contents.values {
+                content.setContentScale(viewport.zoom)
+            }
+        }
         persist()
         onStateChange?()
     }

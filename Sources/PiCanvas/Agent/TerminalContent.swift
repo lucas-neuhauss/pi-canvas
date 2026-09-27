@@ -69,8 +69,21 @@ final class TerminalContent: AgentContent {
     // MARK: - Appearance
 
     static let terminalFont: NSFont = {
-        NSFont(name: "Menlo", size: 12.5) ?? NSFont.monospacedSystemFont(ofSize: 12.5, weight: .regular)
+        NSFont(name: "Menlo", size: baseFontSize) ?? NSFont.monospacedSystemFont(ofSize: baseFontSize, weight: .regular)
     }()
+
+    /// Font size at 100% zoom.
+    static let baseFontSize: CGFloat = 12.5
+    /// Below this the cell metrics get silly; above it a node stops looking like
+    /// a terminal.
+    static let minFontSize: CGFloat = 4
+    static let maxFontSize: CGFloat = 30
+
+    /// Last font size actually applied, so we can skip redundant work.
+    private var appliedFontSize: CGFloat = TerminalContent.baseFontSize
+
+    /// Current glyph size, for diagnostics and tests.
+    var contentFontSize: CGFloat { appliedFontSize }
 
     static let backgroundColor = NSColor(srgbRed: 0.055, green: 0.058, blue: 0.067, alpha: 1)
     static let foregroundColor = NSColor(srgbRed: 0.82, green: 0.84, blue: 0.87, alpha: 1)
@@ -131,6 +144,22 @@ final class TerminalContent: AgentContent {
 
     func setFocused(_ focused: Bool) {
         // The node's border communicates focus; nothing to do inside the terminal.
+    }
+
+    /// Zooming the canvas scales the glyphs, so a node's text shrinks when you
+    /// zoom out instead of staying a fixed size inside a shrinking box. Because
+    /// the font and the node's pixel size scale together, the grid (cols × rows)
+    /// stays essentially constant — resizing a node is what reveals more content.
+    func setContentScale(_ scale: CGFloat) {
+        let target = min(max(TerminalContent.baseFontSize * scale, TerminalContent.minFontSize), TerminalContent.maxFontSize)
+        // Quantise so a pinch does not rebuild the font on every event.
+        let quantised = (target * 4).rounded() / 4
+        guard abs(quantised - appliedFontSize) > 0.01 else { return }
+        appliedFontSize = quantised
+
+        let familyName = terminal.font.fontName
+        terminal.font = NSFont(name: familyName, size: quantised)
+            ?? NSFont.monospacedSystemFont(ofSize: quantised, weight: .regular)
     }
 
     var reportedGrid: (cols: Int, rows: Int) { (lastReportedCols, lastReportedRows) }
