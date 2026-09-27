@@ -124,6 +124,7 @@ enum SelfTest {
         testAgentStatusWatcher(checker: checker)
         testGhosttyConfig(checker: checker)
         testAttentionAndJump(checker: checker)
+        testScrollRouting(checker: checker)
         testScrollbackPersistence(checker: checker)
         testTerminalRoundTrip(checker: checker)
         testResizeReflow(checker: checker)
@@ -663,6 +664,88 @@ enum SelfTest {
         }
 
         try? FileManager.default.removeItem(at: root)
+    }
+
+    /// Scrolling must move the canvas, not the terminal under the pointer —
+    /// unless that terminal is the focused one. This pins the policy, which
+    /// otherwise lives inside an event monitor and would drift silently.
+    private static func testScrollRouting(checker: Checker) {
+        print("\nscroll routing")
+
+        let canvas = CanvasView(frame: CGRect(x: 0, y: 0, width: 1200, height: 800))
+        let window = NSWindow(
+            contentRect: canvas.frame,
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = canvas
+        window.makeKeyAndOrderFront(nil)
+
+        let layoutURL = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("picanvas-scroll-\(UUID().uuidString).json")
+        let controller = CanvasController(canvas: canvas, store: LayoutStore(fileURL: layoutURL))
+        controller.contentFactory = { _ in RecordingContent() }
+
+        checker.check(
+            !canvas.terminalHandlesScroll(at: CGPoint(x: 10, y: 10)),
+            "an empty canvas routes scroll to itself"
+        )
+
+        controller.newNode(kind: .shell)
+        guard let first = canvas.nodeViews.first else {
+            checker.check(false, "node created")
+            window.close()
+            return
+        }
+
+        func centre(of node: NodeFrameView) -> CGPoint {
+            // Recompute on demand: creating another node pans the viewport.
+            CGPoint(x: node.frame.midX, y: node.frame.midY)
+        }
+
+        checker.check(
+            canvas.terminalHandlesScroll(at: centre(of: first)),
+            "the focused terminal keeps its own scrolling"
+        )
+
+        controller.newNode(kind: .shell)
+        guard let second = canvas.nodeViews.last, second.nodeID != first.nodeID else {
+            checker.check(false, "second node created")
+            window.close()
+            return
+        }
+
+        checker.check(
+            canvas.terminalHandlesScroll(at: centre(of: second)),
+            "the newly focused terminal scrolls itself"
+        )
+        checker.check(
+            !canvas.terminalHandlesScroll(at: centre(of: first)),
+            "a terminal that is not focused no longer steals scroll"
+        )
+
+        canvas.select(nil, focusContent: false)
+        checker.check(
+            !canvas.terminalHandlesScroll(at: centre(of: first)),
+            "with nothing selected the first terminal is unaffected"
+        )
+        checker.check(
+            !canvas.terminalHandlesScroll(at: centre(of: second)),
+            "with nothing selected the second terminal is unaffected"
+        )
+        checker.check(
+            !canvas.terminalHandlesScroll(at: CGPoint(x: 10, y: 10)),
+            "with nothing selected empty canvas still pans"
+        )
+
+        canvas.select(first, focusContent: false)
+        checker.check(
+            canvas.terminalHandlesScroll(at: centre(of: first)),
+            "selecting a terminal hands scrolling back to it"
+        )
+
+        window.close()
     }
 
     /// The whole agent-awareness chain: transcripts on disk → node status pills →

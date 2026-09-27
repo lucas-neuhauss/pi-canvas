@@ -94,7 +94,6 @@ struct NodeChrome {
     var titleFontSize: CGFloat { 12 * scale }
     var subtitleFontSize: CGFloat { 11 * scale }
     var pillFontSize: CGFloat { 10 * scale }
-    var gripLineWidth: CGFloat { max(1.0, 1.4 * scale) }
 }
 
 /// One panel on the canvas: a title bar, a resize border, and a content view
@@ -170,8 +169,6 @@ final class NodeFrameView: NSView {
     private var dragStartWorldMouse: CGPoint = .zero
     private var dragStartWorldFrame: CGRect = .zero
     private var didDrag = false
-    private var hoveredEdge: ResizeEdge?
-    private var hoverTrackingArea: NSTrackingArea?
 
     private var chrome: NodeChrome { NodeChrome(scale: chromeScale) }
 
@@ -250,21 +247,6 @@ final class NodeFrameView: NSView {
         )
     }
 
-    override func updateTrackingAreas() {
-        super.updateTrackingAreas()
-        if let hoverTrackingArea {
-            removeTrackingArea(hoverTrackingArea)
-        }
-        let area = NSTrackingArea(
-            rect: bounds,
-            options: [.mouseMoved, .mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
-            owner: self,
-            userInfo: nil
-        )
-        addTrackingArea(area)
-        hoverTrackingArea = area
-    }
-
     override func resetCursorRects() {
         super.resetCursorRects()
         let chrome = chrome
@@ -302,24 +284,6 @@ final class NodeFrameView: NSView {
     private func worldPoint(for event: NSEvent) -> CGPoint? {
         guard let canvas = superview as? CanvasView else { return nil }
         return canvas.worldPoint(fromScreen: canvasPoint(for: event))
-    }
-
-    // MARK: - Hover
-
-    override func mouseMoved(with event: NSEvent) {
-        let point = convert(event.locationInWindow, from: nil)
-        let edge = resizeEdge(at: point)
-        if edge != hoveredEdge {
-            hoveredEdge = edge
-            needsDisplay = true
-        }
-    }
-
-    override func mouseExited(with event: NSEvent) {
-        if hoveredEdge != nil {
-            hoveredEdge = nil
-            needsDisplay = true
-        }
     }
 
     // MARK: - Mouse interaction
@@ -436,7 +400,6 @@ final class NodeFrameView: NSView {
     private let borderIdle = NSColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.10)
     private let borderSelected = NSColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.28)
     private let separatorColor = NSColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.07)
-    private let accentColor = NSColor(srgbRed: 0.42, green: 0.60, blue: 0.98, alpha: 1)
 
     override func draw(_ dirtyRect: NSRect) {
         guard let context = NSGraphicsContext.current?.cgContext else { return }
@@ -467,7 +430,6 @@ final class NodeFrameView: NSView {
         context.restoreGState()
 
         drawTitleBar()
-        drawResizeAffordances()
     }
 
     private func drawTitleBar() {
@@ -606,65 +568,6 @@ final class NodeFrameView: NSView {
         }
     }
 
-    /// Corner brackets on every corner say "drag any edge", and the grabbed
-    /// border lights up on hover so resizing is discoverable.
-    private func drawResizeAffordances() {
-        let chrome = chrome
-        let inset = max(2.5 * chromeScale, 2)
-        let length = max(9 * chromeScale, 7)
-        let lineWidth = chrome.gripLineWidth
-        let radius = max(chrome.cornerRadius - inset, 2)
-
-        // Corner brackets.
-        let corners: [(CGPoint, CGPoint, CGPoint)] = [
-            // top-left
-            (CGPoint(x: inset, y: inset + radius + length), CGPoint(x: inset, y: inset + radius), CGPoint(x: inset + radius + length, y: inset)),
-            // top-right
-            (CGPoint(x: bounds.width - inset - radius - length, y: inset), CGPoint(x: bounds.width - inset - radius, y: inset), CGPoint(x: bounds.width - inset, y: inset + radius + length)),
-            // bottom-left
-            (CGPoint(x: inset, y: bounds.height - inset - radius - length), CGPoint(x: inset, y: bounds.height - inset - radius), CGPoint(x: inset + radius + length, y: bounds.height - inset)),
-            // bottom-right
-            (CGPoint(x: bounds.width - inset - radius - length, y: bounds.height - inset), CGPoint(x: bounds.width - inset - radius, y: bounds.height - inset), CGPoint(x: bounds.width - inset, y: bounds.height - inset - radius - length))
-        ]
-
-        let idleAlpha: CGFloat = isFocused ? 0.34 : 0.20
-        let path = NSBezierPath()
-        for (start, corner, end) in corners {
-            path.move(to: start)
-            path.line(to: corner)
-            path.line(to: end)
-        }
-        path.lineWidth = lineWidth
-        path.lineCapStyle = .round
-        NSColor(srgbRed: 1, green: 1, blue: 1, alpha: idleAlpha).setStroke()
-        path.stroke()
-
-        drawHoveredEdgeHighlight()
-    }
-
-    private func drawHoveredEdgeHighlight() {
-        guard let edge = hoveredEdge else { return }
-        let thickness = max(2.5 * chromeScale, 2)
-
-        var rects: [CGRect] = []
-        if edge.contains(.left) {
-            rects.append(CGRect(x: 0, y: 0, width: thickness, height: bounds.height))
-        }
-        if edge.contains(.right) {
-            rects.append(CGRect(x: bounds.width - thickness, y: 0, width: thickness, height: bounds.height))
-        }
-        if edge.contains(.top) {
-            rects.append(CGRect(x: 0, y: 0, width: bounds.width, height: thickness))
-        }
-        if edge.contains(.bottom) {
-            rects.append(CGRect(x: 0, y: bounds.height - thickness, width: bounds.width, height: thickness))
-        }
-
-        accentColor.withAlphaComponent(0.85).setFill()
-        for rect in rects {
-            NSBezierPath(roundedRect: rect, xRadius: thickness / 2, yRadius: thickness / 2).fill()
-        }
-    }
 }
 
 /// Native frame-resize cursors where available, SF Symbol cursors elsewhere.

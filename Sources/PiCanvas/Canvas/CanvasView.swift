@@ -389,13 +389,15 @@ final class CanvasView: NSView {
     /// dispatch and only *observes*: it never consumes the event, so text
     /// selection and mouse reporting inside the terminal still work.
     private var clickMonitor: Any?
+    /// Routes scrolling away from terminals that are not the focused one.
+    private var scrollMonitor: Any?
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         if window == nil {
-            removeClickMonitor()
+            removeMonitors()
         } else {
-            installClickMonitor()
+            installMonitors()
         }
     }
 
@@ -403,23 +405,56 @@ final class CanvasView: NSView {
         if let clickMonitor {
             NSEvent.removeMonitor(clickMonitor)
         }
-    }
-
-    private func installClickMonitor() {
-        guard clickMonitor == nil else { return }
-        clickMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown]) { [weak self] event in
-            if let self, event.window === self.window {
-                self.noteClick(atWindowPoint: event.locationInWindow)
-            }
-            return event
+        if let scrollMonitor {
+            NSEvent.removeMonitor(scrollMonitor)
         }
     }
 
-    private func removeClickMonitor() {
+    private func installMonitors() {
+        if clickMonitor == nil {
+            clickMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown]) { [weak self] event in
+                if let self, event.window === self.window {
+                    self.noteClick(atWindowPoint: event.locationInWindow)
+                }
+                return event
+            }
+        }
+
+        if scrollMonitor == nil {
+            scrollMonitor = NSEvent.addLocalMonitorForEvents(matching: [.scrollWheel]) { [weak self] event in
+                guard let self, event.window === self.window else { return event }
+                let canvasPoint = self.convert(event.locationInWindow, from: nil)
+                // Status-bar and other chrome clicks arrive here too.
+                guard self.bounds.contains(canvasPoint) else { return event }
+                guard !self.terminalHandlesScroll(at: canvasPoint) else { return event }
+                // Otherwise the canvas pans (or ⌘-zooms), and the terminal under
+                // the pointer never sees the event.
+                self.scrollWheel(with: event)
+                return nil
+            }
+        }
+    }
+
+    private func removeMonitors() {
         if let clickMonitor {
             NSEvent.removeMonitor(clickMonitor)
             self.clickMonitor = nil
         }
+        if let scrollMonitor {
+            NSEvent.removeMonitor(scrollMonitor)
+            self.scrollMonitor = nil
+        }
+    }
+
+    /// Whether the terminal under this point should scroll itself.
+    ///
+    /// Only the focused node does. Scrolling across a canvas of terminals should
+    /// move the canvas; otherwise the terminal that happens to be under the
+    /// pointer scrolls its own history, which is almost never what you meant.
+    /// With nothing focused, no terminal is affected at all.
+    func terminalHandlesScroll(at canvasPoint: CGPoint) -> Bool {
+        guard let node = nodeViews.last(where: { $0.frame.contains(canvasPoint) }) else { return false }
+        return node.nodeID == focusedNodeID
     }
 
     private func noteClick(atWindowPoint point: CGPoint) {
