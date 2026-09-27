@@ -496,12 +496,34 @@ enum SelfTest {
         )
 
         // The run finishes: this is the state worth surfacing.
-        append("{\"type\":\"message\",\"id\":\"a4\",\"parentId\":\"a3\",\"timestamp\":\"\(timestamp(4))\",\"message\":{\"role\":\"assistant\",\"stopReason\":\"stop\",\"content\":[{\"type\":\"text\",\"text\":\"done\"}]}}")
+        append("{\"type\":\"message\",\"id\":\"a4\",\"parentId\":\"a3\",\"timestamp\":\"\(timestamp(4))\",\"message\":{\"role\":\"assistant\",\"stopReason\":\"stop\",\"model\":\"test-model\",\"provider\":\"test-provider\",\"content\":[{\"type\":\"text\",\"text\":\"done\"}],\"usage\":{\"input\":1000,\"output\":200,\"cacheRead\":50,\"cacheWrite\":0,\"totalTokens\":1250,\"cost\":{\"total\":0.004}}}}")
         checker.check(
             waitUntil(timeout: 3) { watcher.state == .waitingForYou },
             "a finished run means the agent needs you"
         )
         checker.check(observed.contains(.waitingForYou), "the change was reported to the canvas")
+
+        // Usage and cost are accumulated for the node.
+        checker.check(
+            waitUntil(timeout: 3) { watcher.usage.turns == 1 },
+            "one assistant turn was counted"
+        )
+        checker.equal(watcher.usage.lastContextTokens, 1250, "context size comes from the last turn")
+        checker.equal(watcher.usage.model, "test-model", "model name is read from the transcript")
+        checker.equal(watcher.usage.provider, "test-provider", "provider is read from the transcript")
+        checker.equal(watcher.usage.costText, "$0.0040", "cost is formatted for a title bar")
+        checker.check(watcher.usage.detailText.contains("test-model (test-provider)"), "detail mentions the model")
+        checker.check(watcher.usage.detailText.contains("context 1.2k"), "detail mentions the context size")
+
+        // A second turn accumulates rather than replaces.
+        append("{\"type\":\"message\",\"id\":\"a6\",\"parentId\":\"a5\",\"timestamp\":\"\(timestamp(6))\",\"message\":{\"role\":\"assistant\",\"stopReason\":\"stop\",\"model\":\"test-model\",\"provider\":\"test-provider\",\"content\":[{\"type\":\"text\",\"text\":\"done again\"}],\"usage\":{\"input\":500,\"output\":100,\"cacheRead\":0,\"cacheWrite\":0,\"totalTokens\":1900,\"cost\":{\"total\":0.001}}}}")
+        checker.check(
+            waitUntil(timeout: 3) { watcher.usage.turns == 2 },
+            "a second turn is counted"
+        )
+        checker.equal(watcher.usage.inputTokens, 1500, "input tokens accumulate")
+        checker.equal(watcher.usage.lastContextTokens, 1900, "context reflects the newest turn")
+        checker.equal(watcher.usage.costText, "$0.0050", "cost accumulates")
 
         // A new prompt starts the cycle again.
         append("{\"type\":\"message\",\"id\":\"a5\",\"parentId\":\"a4\",\"timestamp\":\"\(timestamp(5))\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"again\"}]}}")

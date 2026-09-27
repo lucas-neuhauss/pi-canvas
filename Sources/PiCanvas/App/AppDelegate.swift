@@ -89,7 +89,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             needingAttention: controller.agentsNeedingAttention.count
         )
         let count = controller.nodeCount
-        window.title = count == 0 ? "PiCanvas" : "PiCanvas — \(count) node\(count == 1 ? "" : "s")"
+        var title = count == 0 ? "PiCanvas" : "PiCanvas — \(count) node\(count == 1 ? "" : "s")"
+        if let cost = PiUsage.formatCost(controller.totalAgentCost) {
+            title += " · \(cost)"
+        }
+        window.title = title
     }
 
     // MARK: - Actions

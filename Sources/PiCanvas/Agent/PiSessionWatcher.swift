@@ -27,6 +27,58 @@ enum PiAgentState: Equatable {
     }
 }
 
+/// Token and cost totals for one agent session, accumulated from the transcript.
+struct PiUsage: Equatable {
+    var costUSD: Double = 0
+    var inputTokens = 0
+    var outputTokens = 0
+    var cacheReadTokens = 0
+    var cacheWriteTokens = 0
+    /// Context size of the most recent turn, i.e. how full the window is.
+    var lastContextTokens = 0
+    var turns = 0
+    var model: String?
+    var provider: String?
+
+    var isEmpty: Bool { turns == 0 && model == nil }
+
+    /// Compact money for a title bar: `$0.0008`, `$0.012`, `$1.24`.
+    var costText: String? { PiUsage.formatCost(costUSD) }
+
+    /// Compact money for anywhere: `$0.0008`, `$0.012`, `$1.24`.
+    static func formatCost(_ usd: Double) -> String? {
+        guard usd > 0 else { return nil }
+        if usd < 0.01 { return String(format: "$%.4f", usd) }
+        if usd < 1 { return String(format: "$%.3f", usd) }
+        return String(format: "$%.2f", usd)
+    }
+
+    var detailText: String {
+        guard !isEmpty else { return "" }
+        var parts: [String] = []
+        if let model {
+            parts.append(provider.map { "\(model) (\($0))" } ?? model)
+        }
+        parts.append("\(turns) turn\(turns == 1 ? "" : "s")")
+        if lastContextTokens > 0 {
+            parts.append("context \(PiUsage.formatTokens(lastContextTokens))")
+        }
+        if inputTokens > 0 || outputTokens > 0 {
+            parts.append("↑\(PiUsage.formatTokens(inputTokens)) ↓\(PiUsage.formatTokens(outputTokens))")
+        }
+        if let costText {
+            parts.append(costText)
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    static func formatTokens(_ value: Int) -> String {
+        if value >= 1_000_000 { return String(format: "%.1fM", Double(value) / 1_000_000) }
+        if value >= 1_000 { return String(format: "%.1fk", Double(value) / 1_000) }
+        return "\(value)"
+    }
+}
+
 /// Tails a pi session file and reports what the agent is doing.
 ///
 /// pi writes one JSON object per line as work completes, so the *last* entry
@@ -49,6 +101,7 @@ final class PiSessionWatcher {
     private let sessionsRoot: URL
     private let pollInterval: TimeInterval
     private let onStateChange: (PiAgentState) -> Void
+    private let onUsageChange: ((PiUsage) -> Void)?
 
     private var timer: Timer?
     private var fileURL: URL?
@@ -63,6 +116,14 @@ final class PiSessionWatcher {
         }
     }
 
+    /// Token/cost totals so far, updated as the transcript grows.
+    private(set) var usage = PiUsage() {
+        didSet {
+            guard usage != oldValue else { return }
+            onUsageChange?(usage)
+        }
+    }
+
     /// - Parameters:
     ///   - workingDirectory: the directory pi runs in; sessions are grouped by
     ///     real path, so symlinks are resolved.
@@ -74,12 +135,14 @@ final class PiSessionWatcher {
         sessionID: String,
         sessionsRoot: URL? = nil,
         pollInterval: TimeInterval = 0.7,
-        onStateChange: @escaping (PiAgentState) -> Void
+        onStateChange: @escaping (PiAgentState) -> Void,
+        onUsageChange: ((PiUsage) -> Void)? = nil
     ) {
         self.sessionID = sessionID
         self.sessionsRoot = sessionsRoot ?? PiSessionWatcher.defaultSessionsRoot()
         self.pollInterval = pollInterval
         self.onStateChange = onStateChange
+        self.onUsageChange = onUsageChange
         self.directory = PiSessionWatcher.sessionDirectory(
             for: workingDirectory,
             under: self.sessionsRoot
@@ -226,10 +289,26 @@ final class PiSessionWatcher {
     }
 
     private func handle(line: Data) {
-        guard !line.isEmpty,
-              let object = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
-              object["type"] as? String == "message",
-              let message = object["message"] as? [String: Any],
+        guard let object = try? JSONSerialization.jsonObject(with: line) as? [String: Any] else {
+            return
+        }
+
+        switch object["type"] as? String {
+        case "model_change":
+            if let modelId = object["modelId"] as? String {
+                usage.model = modelId
+                usage.provider = object["provider"] as? String
+            }
+            return
+
+        case "message":
+            break
+
+        default:
+            return
+        }
+
+        guard let message = object["message"] as? [String: Any],
               let role = message["role"] as? String else {
             return
         }
@@ -239,6 +318,7 @@ final class PiSessionWatcher {
             state = .working("thinking")
 
         case "assistant":
+            accumulateUsage(from: message)
             let stopReason = message["stopReason"] as? String
             if stopReason == "toolUse" || stopReason == "tool_calls" {
                 state = .working(lastToolName(in: message) ?? "working")
@@ -260,5 +340,24 @@ final class PiSessionWatcher {
     private func lastToolName(in message: [String: Any]) -> String? {
         guard let content = message["content"] as? [[String: Any]] else { return nil }
         return content.last { $0["type"] as? String == "toolCall" }?["name"] as? String
+    }
+
+    /// Adds one assistant turn's `usage` to the running totals.
+    private func accumulateUsage(from message: [String: Any]) {
+        if let model = message["model"] as? String {
+            usage.model = model
+            usage.provider = message["provider"] as? String
+        }
+        guard let usageObject = message["usage"] as? [String: Any] else { return }
+
+        usage.turns += 1
+        if let input = usageObject["input"] as? Int { usage.inputTokens += input }
+        if let output = usageObject["output"] as? Int { usage.outputTokens += output }
+        if let cacheRead = usageObject["cacheRead"] as? Int { usage.cacheReadTokens += cacheRead }
+        if let cacheWrite = usageObject["cacheWrite"] as? Int { usage.cacheWriteTokens += cacheWrite }
+        if let total = usageObject["totalTokens"] as? Int { usage.lastContextTokens = total }
+        if let cost = usageObject["cost"] as? [String: Any], let total = cost["total"] as? Double {
+            usage.costUSD += total
+        }
     }
 }

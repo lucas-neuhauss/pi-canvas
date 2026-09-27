@@ -86,6 +86,10 @@ final class NodeFrameView: NSView {
     var statusKind: NodeStatusKind = .idle {
         didSet { needsDisplay = true }
     }
+    /// Session spend so far, drawn as dim text in the title bar.
+    var costText: String? {
+        didSet { if costText != oldValue { needsDisplay = true } }
+    }
 
     var isSelected = false {
         didSet { if isSelected != oldValue { needsDisplay = true } }
@@ -360,6 +364,29 @@ final class NodeFrameView: NSView {
 
         // Status pill, if any.
         var textRightLimit = close.minX - 6
+
+        // Session cost, as quiet dim text before the pill.
+        if let costText, !costText.isEmpty {
+            let font = NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .regular)
+            let attributes: [NSAttributedString.Key: Any] = [
+                .font: font,
+                .foregroundColor: NSColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.40)
+            ]
+            let size = (costText as NSString).size(withAttributes: attributes)
+            let leftEdge = dotX + dotDiameter + 46
+            if textRightLimit - size.width - 12 > leftEdge {
+                (costText as NSString).draw(
+                    in: CGRect(
+                        x: textRightLimit - size.width,
+                        y: (NodeMetrics.titleBarHeight - size.height) / 2,
+                        width: size.width,
+                        height: size.height
+                    ),
+                    withAttributes: attributes
+                )
+                textRightLimit -= size.width + 12
+            }
+        }
         if let statusText, !statusText.isEmpty {
             let font = NSFont.systemFont(ofSize: 10, weight: .medium)
             let colors = statusKind.colors

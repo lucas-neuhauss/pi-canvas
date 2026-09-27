@@ -26,6 +26,14 @@ final class CanvasController: NSObject {
     /// Nodes whose agent has finished a run and is waiting for a human.
     private(set) var agentsNeedingAttention: [UUID] = []
 
+    /// Token/cost totals per pi node, straight from the transcripts.
+    private(set) var agentUsage: [UUID: PiUsage] = [:]
+
+    /// Combined spend across every node, for the window title.
+    var totalAgentCost: Double {
+        agentUsage.values.reduce(0) { $0 + $1.costUSD }
+    }
+
     /// Directory new nodes are created in.
     private(set) var defaultWorkingDirectory: String = ProcessResolver.launchWorkingDirectory
 
@@ -232,6 +240,7 @@ final class CanvasController: NSObject {
         watchers[nodeID]?.stop()
         watchers[nodeID] = nil
         agentsNeedingAttention.removeAll { $0 == nodeID }
+        agentUsage[nodeID] = nil
         contents[nodeID]?.terminate()
         contents[nodeID] = nil
         canvas.removeNodeView(node)
@@ -270,10 +279,14 @@ final class CanvasController: NSObject {
         let watcher = PiSessionWatcher(
             workingDirectory: spec.workingDirectory,
             sessionID: sessionID,
-            sessionsRoot: sessionsRoot
-        ) { [weak self] state in
-            self?.apply(agentState: state, to: id)
-        }
+            sessionsRoot: sessionsRoot,
+            onStateChange: { [weak self] state in
+                self?.apply(agentState: state, to: id)
+            },
+            onUsageChange: { [weak self] usage in
+                self?.apply(usage: usage, to: id)
+            }
+        )
         watchers[id] = watcher
         node.statusText = watcher.state.displayText
         node.statusKind = watcher.state.statusKind
@@ -293,6 +306,15 @@ final class CanvasController: NSObject {
         if state == .waitingForYou, !NSApp.isActive, canvas.focusedNodeID != nodeID {
             NSApp.requestUserAttention(.informationalRequest)
         }
+        onStateChange?()
+    }
+
+    private func apply(usage: PiUsage, to nodeID: UUID) {
+        agentUsage[nodeID] = usage
+        guard let node = canvas.nodeView(withID: nodeID) else { return }
+        node.costText = usage.costText
+        let detail = usage.detailText
+        node.toolTip = detail.isEmpty ? nil : detail
         onStateChange?()
     }
 
