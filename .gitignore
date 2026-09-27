@@ -1,0 +1,9 @@
+# Build output
+build/
+scratch/
+
+# Vendored third-party sources (fetch with `make deps`)
+Vendor/
+
+.DS_Store
+*.swp
