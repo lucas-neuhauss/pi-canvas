@@ -109,6 +109,7 @@ Sources/PiCanvas/
   Model/
     AgentModel.swift            NodeSpec / LayoutFile
     LayoutStore.swift           debounced atomic JSON persistence
+    ScrollbackStore.swift       per-node terminal snapshots between launches
 ```
 
 ### Three design decisions worth knowing
