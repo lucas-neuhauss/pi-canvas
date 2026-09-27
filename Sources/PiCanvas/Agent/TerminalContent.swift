@@ -135,6 +135,32 @@ final class TerminalContent: AgentContent {
 
     var reportedGrid: (cols: Int, rows: Int) { (lastReportedCols, lastReportedRows) }
 
+    // MARK: Scrollback persistence
+
+    var supportsScrollbackSnapshot: Bool { true }
+
+    /// The whole buffer as plain text. SwiftTerm trims trailing whitespace per
+    /// line and separates with `\n`.
+    func snapshotScrollback() -> Data? {
+        let data = terminal.getBufferAsData(kind: .active, encoding: .utf8)
+        guard !data.isEmpty else { return nil }
+        let trimmed = ScrollbackStore.trimmingTrailingBlankLines(data)
+        guard !trimmed.isEmpty else { return nil }
+        return ScrollbackStore.cap(trimmed)
+    }
+
+    /// Paints a previous snapshot into the (still empty) terminal.
+    ///
+    /// `feed` writes bytes literally, and the buffer snapshot uses bare `\n`, so
+    /// the newlines are turned into CRLF here — otherwise restored lines would
+    /// staircase to the right instead of starting at column 0.
+    func restoreScrollback(_ data: Data) {
+        guard !data.isEmpty, var text = String(data: data, encoding: .utf8) else { return }
+        text = text.replacingOccurrences(of: "\r\n", with: "\n")
+        text = text.replacingOccurrences(of: "\n", with: "\r\n")
+        terminal.feed(text: text)
+    }
+
     /// Type text into the running process (used by future automation hooks).
     func send(text: String) {
         terminal.send(txt: text)

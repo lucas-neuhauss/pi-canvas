@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
@@ -6,6 +7,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private var window: NSWindow!
     private var mainView: MainView!
     private var controller: CanvasController!
+    private var signalSources: [DispatchSourceSignal] = []
 
     // MARK: - Lifecycle
 
@@ -47,6 +49,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
         window.makeKeyAndOrderFront(nil)
         NSApp.activate()
+        installSignalHandlers()
 
         // Restore only once the window is on screen: terminals need a window
         // before their process starts.
@@ -74,6 +77,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         true
+    }
+
+    /// A `kill` should behave like quitting: the canvas saves its layout and
+    /// scrollback snapshots on the way out instead of losing them.
+    private func installSignalHandlers() {
+        for signalNumber in [SIGTERM, SIGINT] {
+            let source = DispatchSource.makeSignalSource(signal: signalNumber, queue: .main)
+            source.setEventHandler {
+                NSApp.terminate(nil)
+            }
+            source.resume()
+            signal(signalNumber, SIG_IGN)
+            signalSources.append(source)
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {

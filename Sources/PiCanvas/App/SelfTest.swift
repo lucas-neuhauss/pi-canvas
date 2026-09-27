@@ -123,6 +123,7 @@ enum SelfTest {
         testPiSessionBinding(checker: checker)
         testAgentStatusWatcher(checker: checker)
         testAttentionAndJump(checker: checker)
+        testScrollbackPersistence(checker: checker)
         testTerminalRoundTrip(checker: checker)
         testResizeReflow(checker: checker)
 
@@ -647,6 +648,105 @@ enum SelfTest {
 
         window.close()
         try? FileManager.default.removeItem(at: root)
+    }
+
+    /// Scrollback must survive a restart for shell nodes: the buffer is
+    /// snapshotted on quit and painted back before the new shell starts.
+    private static func testScrollbackPersistence(checker: Checker) {
+        print("\nscrollback persistence (real PTY)")
+
+        // Capping keeps the newest output and whole lines.
+        let big = Data((1...5000).map { "line\($0)\n" }.joined().utf8)
+        let capped = ScrollbackStore.cap(big, limit: 200)
+        checker.check(capped.count <= 200, "capping bounds the snapshot size (\(capped.count) bytes)")
+        let cappedText = String(decoding: capped, as: UTF8.self)
+        checker.check(cappedText.hasPrefix("line"), "capping starts at a line boundary")
+        checker.check(cappedText.hasSuffix("line5000\n"), "capping keeps the most recent output")
+
+        // The screen buffer is mostly blank rows, which must not be restored.
+        let padded = Data("alpha\nbeta\n\n\n   \n\t\n\n".utf8)
+        checker.equal(
+            String(decoding: ScrollbackStore.trimmingTrailingBlankLines(padded), as: UTF8.self),
+            "alpha\nbeta\n",
+            "trailing blank rows are dropped"
+        )
+        checker.check(
+            ScrollbackStore.trimmingTrailingBlankLines(Data("\n\n\n".utf8)).isEmpty,
+            "an empty terminal snapshots as nothing"
+        )
+
+        let frame = CGRect(x: 0, y: 0, width: 820, height: 520)
+        func makeWindow() -> NSWindow {
+            let window = NSWindow(contentRect: frame, styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+            window.appearance = NSAppearance(named: .darkAqua)
+            window.makeKeyAndOrderFront(nil)
+            return window
+        }
+
+        // 1. Produce real output.
+        let firstWindow = makeWindow()
+        let first = TerminalContent()
+        first.view.frame = frame
+        firstWindow.contentView = first.view
+        let spec = ProcessResolver.makeSpec(kind: .shell, workingDirectory: NSTemporaryDirectory(), worldFrame: frame)
+        first.start(ProcessResolver.request(for: spec))
+        _ = waitUntil(timeout: 10) { first.bufferText()?.isEmpty == false }
+        first.send(text: "echo SCROLLBACK_$((6*7))\n")
+        checker.check(
+            waitUntil(timeout: 10) { first.bufferText()?.contains("SCROLLBACK_42") == true },
+            "the shell produced output to snapshot"
+        )
+
+        guard let snapshot = first.snapshotScrollback() else {
+            checker.check(false, "a snapshot was captured")
+            first.terminate()
+            firstWindow.close()
+            return
+        }
+        checker.check(true, "a snapshot was captured (\(snapshot.count) bytes)")
+        checker.check(
+            String(decoding: snapshot, as: UTF8.self).contains("SCROLLBACK_42"),
+            "the snapshot holds the session output"
+        )
+        first.terminate()
+        _ = waitUntil(timeout: 3) { false }
+        firstWindow.close()
+
+        // 2. Paint it into a fresh terminal before starting anything.
+        let secondWindow = makeWindow()
+        let second = TerminalContent()
+        second.view.frame = frame
+        secondWindow.contentView = second.view
+        second.restoreScrollback(snapshot)
+        let restoredText = second.bufferText() ?? ""
+        checker.check(restoredText.contains("SCROLLBACK_42"), "a restored terminal shows the old output")
+
+        // 3. Lines must not staircase: bare newlines in the snapshot become CRLF.
+        let thirdWindow = makeWindow()
+        let third = TerminalContent()
+        third.view.frame = frame
+        thirdWindow.contentView = third.view
+        third.restoreScrollback(Data("ALPHA_LINE\nBRAVO_LINE\n".utf8))
+        let lines = (third.bufferText() ?? "").split(separator: "\n", omittingEmptySubsequences: false)
+        checker.check(lines.contains { $0.hasPrefix("ALPHA_LINE") }, "restored lines start at column 0 (first line)")
+        checker.check(lines.contains { $0.hasPrefix("BRAVO_LINE") }, "restored lines start at column 0 (no staircase)")
+        thirdWindow.close()
+
+        // 4. A restored terminal must still run a live shell.
+        second.start(ProcessResolver.request(for: spec))
+        _ = waitUntil(timeout: 10) { second.lastReportedCols > 0 }
+        second.send(text: "echo AFTER_$((6*7))\n")
+        checker.check(
+            waitUntil(timeout: 10) { second.bufferText()?.contains("AFTER_42") == true },
+            "a restored terminal still runs a shell"
+        )
+        checker.check(
+            second.bufferText()?.contains("SCROLLBACK_42") == true,
+            "the restored output is still there afterwards"
+        )
+        second.terminate()
+        _ = waitUntil(timeout: 3) { false }
+        secondWindow.close()
     }
 
     /// End-to-end: spawn a real shell in a real PTY, type a command into it, and

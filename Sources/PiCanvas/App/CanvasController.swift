@@ -9,6 +9,7 @@ final class CanvasController: NSObject {
 
     let canvas: CanvasView
     private let store: LayoutStore
+    private let scrollbackStore: ScrollbackStore
 
     private(set) var specs: [UUID: NodeSpec] = [:]
     private var contents: [UUID: AgentContent] = [:]
@@ -40,9 +41,14 @@ final class CanvasController: NSObject {
     /// Fired whenever something the status bar displays changes.
     var onStateChange: (() -> Void)?
 
-    init(canvas: CanvasView, store: LayoutStore = LayoutStore()) {
+    init(
+        canvas: CanvasView,
+        store: LayoutStore = LayoutStore(),
+        scrollbackStore: ScrollbackStore = ScrollbackStore()
+    ) {
         self.canvas = canvas
         self.store = store
+        self.scrollbackStore = scrollbackStore
         super.init()
         canvas.canvasDelegate = self
     }
@@ -63,6 +69,7 @@ final class CanvasController: NSObject {
             pan: CGPoint(x: layout.panX, y: layout.panY),
             notify: false
         )
+        scrollbackStore.prune(keeping: Set(layout.nodes.map(\.id)))
         for spec in layout.nodes {
             add(spec: spec, start: true, select: false)
         }
@@ -188,6 +195,14 @@ final class CanvasController: NSObject {
         // PTY is created with the right grid instead of 0x0 and catching up.
         node.layoutSubtreeIfNeeded()
 
+        // Paint last session's output before the new process prints its prompt,
+        // so a restart does not erase what you were reading. pi nodes are skipped:
+        // pi redraws its own transcript from the session file, and injecting an
+        // old TUI frame would be noise.
+        if spec.kind == .shell, let snapshot = scrollbackStore.load(for: spec.id) {
+            content.restoreScrollback(snapshot)
+        }
+
         if start {
             let request = ProcessResolver.request(for: spec)
             NSLog("[PiCanvas] node %@ start kind=%@ cwd=%@ argv=%@", spec.id.uuidString, spec.kind.rawValue, request.workingDirectory, request.arguments.joined(separator: " "))
@@ -241,6 +256,7 @@ final class CanvasController: NSObject {
         watchers[nodeID] = nil
         agentsNeedingAttention.removeAll { $0 == nodeID }
         agentUsage[nodeID] = nil
+        scrollbackStore.remove(for: nodeID)
         contents[nodeID]?.terminate()
         contents[nodeID] = nil
         canvas.removeNodeView(node)
@@ -262,6 +278,15 @@ final class CanvasController: NSObject {
             watcher.stop()
         }
         watchers.removeAll()
+
+        // Capture what is on screen before the processes go away, so reopening
+        // the app shows the output you left behind.
+        for (id, content) in contents where specs[id]?.kind == .shell {
+            if let snapshot = content.snapshotScrollback() {
+                scrollbackStore.save(snapshot, for: id)
+            }
+        }
+
         for content in contents.values {
             content.terminate()
         }

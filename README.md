@@ -73,6 +73,19 @@ That is the whole notification design: a busy canvas stays quiet, and a finished
 one gets a nudge. Nothing is shown for `thinking` or tool states, because those
 do not need a human.
 
+## Scrollback
+
+Shell nodes also survive a restart visually: on quit each node's terminal buffer
+is snapshotted to `~/Library/Application Support/PiCanvas/scrollback/<node>.txt`
+(capped at 256 KB, trailing blank rows trimmed) and painted back before the new
+shell starts. The restored text is plain — no colours — because it comes from the
+buffer rather than the raw byte stream; the live session below it is fully
+coloured as usual. `pi` nodes are skipped on purpose: pi redraws its own
+transcript from the session file, and injecting an old TUI frame would be noise.
+
+A `kill` behaves like quitting: `SIGTERM` and `SIGINT` are turned into a normal
+termination so the layout and snapshots are written rather than lost.
+
 ## How it works
 
 ```
@@ -131,9 +144,10 @@ to iterate on and has no external moving parts.
 ## Testing
 
 ```sh
-# 93 checks: coordinate maths, zoom anchoring, drag, resize, delete,
+# 117 checks: coordinate maths, zoom anchoring, drag, resize, delete,
 # persistence round-trip, process launch, session binding, the agent status
-# state machine, the needs-you indicator and jump, and two real-PTY tests
+# state machine, the needs-you indicator and jump, scrollback snapshot/restore,
+# and three real-PTY tests
 ./build/PiCanvas.app/Contents/MacOS/PiCanvas --self-test
 
 # Render a window with two nodes to PNG without a display server
@@ -176,6 +190,12 @@ agent attention and jump
   ok   the running node names the tool it is using
   ok   jump pans to bring an off-screen node into view
   ok   the target node is on screen after the jump
+
+scrollback persistence (real PTY)
+  ok   capping starts at a line boundary
+  ok   the snapshot holds the session output
+  ok   restored lines start at column 0 (no staircase)
+  ok   a restored terminal still runs a shell
 ```
 
 ## State
@@ -183,9 +203,10 @@ agent attention and jump
 Canvas layout lives at
 `~/Library/Application Support/PiCanvas/layout.json`: node positions, sizes,
 kind, working directory, the exact argv to relaunch and the pi session id, plus
-viewport zoom and pan. Writes are debounced and atomic. On launch every node is
-recreated with its process restarted and its agent conversation resumed;
-terminal scrollback is not yet restored.
+viewport zoom and pan. Terminal snapshots live beside it in `scrollback/`.
+Writes are debounced and atomic. On launch every node is recreated with its
+process restarted, its agent conversation resumed, and shell scrollback
+restored.
 
 `PI_*` environment variables are stripped before spawning, so a `pi` node started
 from inside another `pi` session does not inherit that session's identity. If
@@ -193,9 +214,7 @@ PiCanvas is force-quit, the child processes die with the pty.
 
 ## Not built yet
 
-- Scrollback restore across relaunch (`docs/SWIFTTERM_API.md` §4 documents the
-  capture architecture; the high-level `LocalProcessTerminalView` has no
-  overridable raw-byte hook, so this needs `TerminalView` + `LocalProcess`)
-- Cost and token readout per node (the transcript already carries `usage`)
+- Cost and token history over time (the transcript already carries `usage`; only
+  the current totals are shown)
 - Node connections, drag-to-snap, minimap, multi-select, saved workspaces
 - A first-run welcome state instead of an empty canvas
