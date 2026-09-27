@@ -7,6 +7,6 @@ import AppKit
 enum TerminalContentFactory {
     @MainActor
     static func make(spec: NodeSpec) -> AgentContent {
-        TerminalContent()
+        SwiftTermContent()
     }
 }

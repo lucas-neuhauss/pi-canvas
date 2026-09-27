@@ -716,15 +716,15 @@ enum SelfTest {
 
         // 1. Produce real output.
         let firstWindow = makeWindow()
-        let first = TerminalContent()
+        let first = makeContent()
         first.view.frame = frame
         firstWindow.contentView = first.view
         let spec = ProcessResolver.makeSpec(kind: .shell, workingDirectory: NSTemporaryDirectory(), worldFrame: frame)
         first.start(ProcessResolver.request(for: spec))
-        _ = waitUntil(timeout: 10) { first.bufferText()?.isEmpty == false }
+        _ = waitUntil(timeout: 10) { first.readText()?.isEmpty == false }
         first.send(text: "echo SCROLLBACK_$((6*7))\n")
         checker.check(
-            waitUntil(timeout: 10) { first.bufferText()?.contains("SCROLLBACK_42") == true },
+            waitUntil(timeout: 10) { first.readText()?.contains("SCROLLBACK_42") == true },
             "the shell produced output to snapshot"
         )
 
@@ -745,34 +745,34 @@ enum SelfTest {
 
         // 2. Paint it into a fresh terminal before starting anything.
         let secondWindow = makeWindow()
-        let second = TerminalContent()
+        let second = makeContent()
         second.view.frame = frame
         secondWindow.contentView = second.view
         second.restoreScrollback(snapshot)
-        let restoredText = second.bufferText() ?? ""
+        let restoredText = second.readText() ?? ""
         checker.check(restoredText.contains("SCROLLBACK_42"), "a restored terminal shows the old output")
 
         // 3. Lines must not staircase: bare newlines in the snapshot become CRLF.
         let thirdWindow = makeWindow()
-        let third = TerminalContent()
+        let third = makeContent()
         third.view.frame = frame
         thirdWindow.contentView = third.view
         third.restoreScrollback(Data("ALPHA_LINE\nBRAVO_LINE\n".utf8))
-        let lines = (third.bufferText() ?? "").split(separator: "\n", omittingEmptySubsequences: false)
+        let lines = (third.readText() ?? "").split(separator: "\n", omittingEmptySubsequences: false)
         checker.check(lines.contains { $0.hasPrefix("ALPHA_LINE") }, "restored lines start at column 0 (first line)")
         checker.check(lines.contains { $0.hasPrefix("BRAVO_LINE") }, "restored lines start at column 0 (no staircase)")
         thirdWindow.close()
 
         // 4. A restored terminal must still run a live shell.
         second.start(ProcessResolver.request(for: spec))
-        _ = waitUntil(timeout: 10) { second.lastReportedCols > 0 }
+        _ = waitUntil(timeout: 10) { second.reportedGrid.cols > 0 }
         second.send(text: "echo AFTER_$((6*7))\n")
         checker.check(
-            waitUntil(timeout: 10) { second.bufferText()?.contains("AFTER_42") == true },
+            waitUntil(timeout: 10) { second.readText()?.contains("AFTER_42") == true },
             "a restored terminal still runs a shell"
         )
         checker.check(
-            second.bufferText()?.contains("SCROLLBACK_42") == true,
+            second.readText()?.contains("SCROLLBACK_42") == true,
             "the restored output is still there afterwards"
         )
         second.terminate()
@@ -794,7 +794,7 @@ enum SelfTest {
         )
         window.appearance = NSAppearance(named: .darkAqua)
 
-        let content = TerminalContent()
+        let content = makeContent()
         content.view.frame = frame
         window.contentView = content.view
         window.makeKeyAndOrderFront(nil)
@@ -808,18 +808,18 @@ enum SelfTest {
         content.start(ProcessResolver.request(for: spec))
 
         let producedOutput = waitUntil(timeout: 10) {
-            (content.bufferText()?.isEmpty == false)
+            (content.readText()?.isEmpty == false)
         }
         checker.check(producedOutput, "a login shell starts and writes a prompt")
 
-        checker.check(content.lastReportedCols > 40, "PTY received a sane column count (\(content.lastReportedCols))")
-        checker.check(content.lastReportedRows > 10, "PTY received a sane row count (\(content.lastReportedRows))")
+        checker.check(content.reportedGrid.cols > 40, "PTY received a sane column count (\(content.reportedGrid.cols))")
+        checker.check(content.reportedGrid.rows > 10, "PTY received a sane row count (\(content.reportedGrid.rows))")
 
         // The echoed command contains the literal `$((6*7))`, so finding
         // PICANVAS_42 in the buffer proves the shell *executed* it.
         content.send(text: "echo PICANVAS_$((6*7))\n")
         let ranCommand = waitUntil(timeout: 10) {
-            content.bufferText()?.contains("PICANVAS_42") == true
+            content.readText()?.contains("PICANVAS_42") == true
         }
         checker.check(ranCommand, "typed input reaches the shell and output comes back")
 
@@ -845,7 +845,7 @@ enum SelfTest {
         )
         window.appearance = NSAppearance(named: .darkAqua)
 
-        let content = TerminalContent()
+        let content = makeContent()
         window.contentView = content.view
         window.makeKeyAndOrderFront(nil)
 
@@ -855,52 +855,72 @@ enum SelfTest {
             worldFrame: window.frame
         )
         content.start(ProcessResolver.request(for: spec))
-        _ = waitUntil(timeout: 10) { content.lastReportedCols > 0 }
+        _ = waitUntil(timeout: 10) { content.reportedGrid.cols > 0 }
 
-        let narrowCols = content.lastReportedCols
-        let narrowRows = content.lastReportedRows
+        let narrowCols = content.reportedGrid.cols
+        let narrowRows = content.reportedGrid.rows
         checker.check(narrowCols > 0 && narrowRows > 0, "PTY starts with a grid (\(narrowCols)x\(narrowRows))")
 
         window.setContentSize(NSSize(width: 1040, height: 640))
         let widened = waitUntil(timeout: 8) {
-            content.lastReportedCols > narrowCols && content.lastReportedRows > narrowRows
+            content.reportedGrid.cols > narrowCols && content.reportedGrid.rows > narrowRows
         }
         checker.check(
             widened,
-            "growing the node gives the PTY a bigger grid (\(narrowCols)x\(narrowRows) → \(content.lastReportedCols)x\(content.lastReportedRows))"
+            "growing the node gives the PTY a bigger grid (\(narrowCols)x\(narrowRows) → \(content.reportedGrid.cols)x\(content.reportedGrid.rows))"
         )
 
-        let wideCols = content.lastReportedCols
+        let wideCols = content.reportedGrid.cols
         window.setContentSize(NSSize(width: 420, height: 260))
-        let narrowed = waitUntil(timeout: 8) { content.lastReportedCols < wideCols }
+        let narrowed = waitUntil(timeout: 8) { content.reportedGrid.cols < wideCols }
         checker.check(
             narrowed,
-            "shrinking the node reduces the grid (\(wideCols) → \(content.lastReportedCols))"
+            "shrinking the node reduces the grid (\(wideCols) → \(content.reportedGrid.cols))"
         )
 
         // Zoom, by contrast, scales the glyphs and leaves the grid alone: the
         // font and the pixel size shrink together, which is what makes zooming
         // out feel like zooming out instead of cropping.
         window.setContentSize(NSSize(width: 1040, height: 640))
-        _ = waitUntil(timeout: 8) { content.lastReportedCols > 100 }
-        let colsAtFullSize = content.lastReportedCols
-        let fontBefore = content.contentFontSize
+        _ = waitUntil(timeout: 8) { content.reportedGrid.cols > 100 }
+        let colsAtFullSize = content.reportedGrid.cols
+        let widthAtFullSize = Double(content.view.frame.width)
         content.setContentScale(0.5)
         window.setContentSize(NSSize(width: 520, height: 320))
-        let scaled = waitUntil(timeout: 8) { content.contentFontSize < fontBefore * 0.75 }
-        checker.check(scaled, "zooming out shrinks the glyphs (\(fontBefore)pt → \(content.contentFontSize)pt)")
+        let scaled = waitUntil(timeout: 8) { abs(content.contentScale - 0.5) < 0.02 }
+        checker.check(scaled, "the content scale was applied (\(content.contentScale))")
         // Cell metrics round to whole pixels, so the grid drifts a few percent;
         // what matters is that it does not halve (which is what happens when the
         // font stays fixed while the view shrinks).
         checker.check(
-            abs(content.lastReportedCols - colsAtFullSize) <= max(6, colsAtFullSize / 10),
-            "zooming out keeps roughly the same content (cols \(colsAtFullSize) → \(content.lastReportedCols))"
+            abs(content.reportedGrid.cols - colsAtFullSize) <= max(6, colsAtFullSize / 10),
+            "zooming out keeps roughly the same content (cols \(colsAtFullSize) → \(content.reportedGrid.cols))"
+        )
+        // And the space each column occupies must have shrunk with the view: that
+        // is the implementation-agnostic way to assert the glyphs got smaller.
+        let cellBefore = widthAtFullSize / Double(colsAtFullSize)
+        let cellAfter = Double(content.view.frame.width) / Double(max(content.reportedGrid.cols, 1))
+        let ratio = cellAfter / cellBefore
+        checker.check(
+            ratio > 0.4 && ratio < 0.65,
+            "zooming out halves the space per column (\(String(format: "%.2f", cellBefore))px → \(String(format: "%.2f", cellAfter))px)"
         )
 
         content.setContentScale(1)
         content.terminate()
         _ = waitUntil(timeout: 6) { false }
         window.close()
+    }
+
+    /// The terminal implementation under test: whatever the app itself would
+    /// build. Keeps this suite honest when the terminal backend changes.
+    private static func makeContent() -> AgentContent {
+        let spec = ProcessResolver.makeSpec(
+            kind: .shell,
+            workingDirectory: NSTemporaryDirectory(),
+            worldFrame: CGRect(x: 0, y: 0, width: 800, height: 500)
+        )
+        return TerminalContentFactory.make(spec: spec)
     }
 
     /// Spins the run loop until `condition` holds or the timeout elapses.

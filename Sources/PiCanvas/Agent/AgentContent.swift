@@ -34,6 +34,18 @@ protocol AgentContent: AnyObject {
     /// it shows.
     func setContentScale(_ scale: CGFloat)
 
+    // MARK: Interaction and introspection
+
+    /// Type text into the running process, as if the user had typed it.
+    func send(text: String)
+
+    /// The terminal's content as text, when the implementation can read it back.
+    /// Used by the scrollback snapshot and by the self-test.
+    func readText() -> String?
+
+    /// The scale last accepted by `setContentScale`.
+    var contentScale: CGFloat { get }
+
     // MARK: Diagnostics
 
     /// Last grid size the terminal reported, or `(0, 0)` when unknown.
@@ -49,6 +61,9 @@ protocol AgentContent: AnyObject {
 extension AgentContent {
     var reportedGrid: (cols: Int, rows: Int) { (0, 0) }
     func setContentScale(_ scale: CGFloat) {}
+    func send(text: String) {}
+    func readText() -> String? { nil }
+    var contentScale: CGFloat { 1 }
     var supportsScrollbackSnapshot: Bool { false }
     func snapshotScrollback() -> Data? { nil }
     func restoreScrollback(_ data: Data) {}

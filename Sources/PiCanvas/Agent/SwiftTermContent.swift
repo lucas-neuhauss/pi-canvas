@@ -12,7 +12,7 @@ import Darwin
 /// gives us process lifecycle callbacks, clipboard handling and input coalescing
 /// for free, which is the right deal for now.
 @MainActor
-final class TerminalContent: AgentContent {
+final class SwiftTermContent: AgentContent {
 
     let view: NSView
 
@@ -29,9 +29,8 @@ final class TerminalContent: AgentContent {
     private(set) var lastReportedCols = 0
     private(set) var lastReportedRows = 0
 
-    /// Read the visible buffer back as text. Used by the self-test today, and
-    /// the foundation for scrollback persistence later.
-    func bufferText() -> String? {
+    /// Read the visible buffer back as text.
+    func readText() -> String? {
         let data = terminal.getBufferAsData(kind: .active, encoding: .utf8)
         guard !data.isEmpty else { return nil }
         return String(data: data, encoding: .utf8)
@@ -49,13 +48,13 @@ final class TerminalContent: AgentContent {
 
         let terminal = LocalProcessTerminalView(
             frame: .zero,
-            font: TerminalContent.terminalFont,
+            font: SwiftTermContent.terminalFont,
             options: options
         )
-        terminal.nativeBackgroundColor = TerminalContent.backgroundColor
-        terminal.nativeForegroundColor = TerminalContent.foregroundColor
-        terminal.caretColor = TerminalContent.caretColor
-        terminal.selectedTextBackgroundColor = TerminalContent.selectionColor
+        terminal.nativeBackgroundColor = SwiftTermContent.backgroundColor
+        terminal.nativeForegroundColor = SwiftTermContent.foregroundColor
+        terminal.caretColor = SwiftTermContent.caretColor
+        terminal.selectedTextBackgroundColor = SwiftTermContent.selectionColor
         // A canvas full of terminals should scroll its own content, not the page.
         terminal.scrollSensitivity = 1.0
         // Small tabs, not a chunky scroller, inside a node.
@@ -80,10 +79,13 @@ final class TerminalContent: AgentContent {
     static let maxFontSize: CGFloat = 30
 
     /// Last font size actually applied, so we can skip redundant work.
-    private var appliedFontSize: CGFloat = TerminalContent.baseFontSize
+    private var appliedFontSize: CGFloat = SwiftTermContent.baseFontSize
 
     /// Current glyph size, for diagnostics and tests.
     var contentFontSize: CGFloat { appliedFontSize }
+
+    /// The scale last accepted by `setContentScale`.
+    var contentScale: CGFloat { appliedFontSize / SwiftTermContent.baseFontSize }
 
     static let backgroundColor = NSColor(srgbRed: 0.055, green: 0.058, blue: 0.067, alpha: 1)
     static let foregroundColor = NSColor(srgbRed: 0.82, green: 0.84, blue: 0.87, alpha: 1)
@@ -126,7 +128,7 @@ final class TerminalContent: AgentContent {
         // `terminate()` only sends SIGTERM. An agent that ignores it would leak a
         // process and keep the canvas node haunted, so escalate.
         if let pid, pid > 0 {
-            DispatchQueue.main.asyncAfter(deadline: .now() + TerminalContent.killEscalationDelay) { [weak self] in
+            DispatchQueue.main.asyncAfter(deadline: .now() + SwiftTermContent.killEscalationDelay) { [weak self] in
                 guard let self else { return }
                 if let process = self.terminal.process, process.running, process.shellPid > 0 {
                     kill(process.shellPid, SIGKILL)
@@ -151,7 +153,7 @@ final class TerminalContent: AgentContent {
     /// the font and the node's pixel size scale together, the grid (cols × rows)
     /// stays essentially constant — resizing a node is what reveals more content.
     func setContentScale(_ scale: CGFloat) {
-        let target = min(max(TerminalContent.baseFontSize * scale, TerminalContent.minFontSize), TerminalContent.maxFontSize)
+        let target = min(max(SwiftTermContent.baseFontSize * scale, SwiftTermContent.minFontSize), SwiftTermContent.maxFontSize)
         // Quantise so a pinch does not rebuild the font on every event.
         let quantised = (target * 4).rounded() / 4
         guard abs(quantised - appliedFontSize) > 0.01 else { return }
@@ -190,7 +192,7 @@ final class TerminalContent: AgentContent {
         terminal.feed(text: text)
     }
 
-    /// Type text into the running process (used by future automation hooks).
+    /// Type text into the running process.
     func send(text: String) {
         terminal.send(txt: text)
     }
@@ -199,7 +201,7 @@ final class TerminalContent: AgentContent {
 // MARK: - LocalProcessTerminalViewDelegate
 
 /// All four required callbacks, delivered on the main actor.
-extension TerminalContent: LocalProcessTerminalViewDelegate {
+extension SwiftTermContent: LocalProcessTerminalViewDelegate {
 
     func sizeChanged(source: LocalProcessTerminalView, newCols: Int, newRows: Int) {
         // The terminal resized its own PTY; we only record the size.
