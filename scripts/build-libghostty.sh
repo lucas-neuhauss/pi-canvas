@@ -56,9 +56,14 @@ error: the Metal compiler is not available.
   -Drenderer=opengl, and `metal` ships with Xcode rather than with the
   Command Line Tools alone.
 
-  Fix it by installing Xcode (or Xcode plus the Metal toolchain component),
-  then re-run `make ghostty`. The app builds and runs on the SwiftTerm backend
-  in the meantime.
+  Install Xcode, then:
+    sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+    sudo xcodebuild -license accept
+    xcodebuild -downloadComponent metalToolchain     # or Xcode > Settings > Components
+  and verify with:
+    xcrun -sdk macosx metal --version
+
+  The app builds and runs on the SwiftTerm backend in the meantime.
 MESSAGE
 	exit 1
 fi
@@ -67,6 +72,10 @@ fi
 
 echo "==> building libghostty (this takes several minutes the first time)"
 rm -rf "$XCFRAMEWORK"
+# The xcframework packaging step shells out to xcodebuild. With Xcode installed
+# that succeeds; if it is the only step that fails, the compiled library is still
+# in the Zig cache and we collect it below rather than rebuilding.
+BUILD_STATUS=0
 (
 	cd "$GHOSTTY_SRC"
 	zig build \
@@ -74,20 +83,25 @@ rm -rf "$XCFRAMEWORK"
 		-Doptimize=ReleaseFast \
 		-Demit-xcframework=true \
 		-Demit-macos-app=false
-)
+) || BUILD_STATUS=$?
 
 # --- Collect the macOS slice ------------------------------------------------
 
 mkdir -p "$OUT_DIR/include"
 
-MACOS_SLICE="$(find "$XCFRAMEWORK" -maxdepth 2 -name "macos-*" -type d | head -1)"
+MACOS_SLICE="$(find "$XCFRAMEWORK" -maxdepth 2 -name "macos-*" -type d 2>/dev/null | head -1)"
 if [[ -n "$MACOS_SLICE" && -f "$MACOS_SLICE/libghostty.a" ]]; then
 	cp "$MACOS_SLICE/libghostty.a" "$OUT_DIR/libghostty.a"
 	cp "$MACOS_SLICE/Headers/ghostty.h" "$OUT_DIR/include/ghostty.h"
 else
 	# Fall back to the library the build produced before packaging.
-	STATIC_LIB="$(find "$GHOSTTY_SRC/.zig-cache" -name "ghostty-internal*.a" -newermt "-2 hours" | head -1)"
-	[[ -n "$STATIC_LIB" ]] || die "could not find the built library in $XCFRAMEWORK or the zig cache"
+	STATIC_LIB="$(find "$GHOSTTY_SRC/.zig-cache" -name "ghostty-internal*.a" -newermt "-2 hours" 2>/dev/null | head -1)"
+	if [[ -z "$STATIC_LIB" ]]; then
+		echo "error: the build produced no usable library (status $BUILD_STATUS)" >&2
+		echo "       see the zig output above" >&2
+		exit 1
+	fi
+	echo "==> using the compiled library from the zig cache"
 	cp "$STATIC_LIB" "$OUT_DIR/libghostty.a"
 	cp "$GHOSTTY_SRC/include/ghostty.h" "$OUT_DIR/include/ghostty.h"
 fi
