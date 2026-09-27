@@ -8,11 +8,16 @@ SWIFTTERM_LIB := build/swiftterm/libSwiftTerm.a
 
 all: app
 
-## Fetch vendored sources (SwiftTerm) if missing.
+## Fetch vendored sources (SwiftTerm fallback + Ghostty's core) if missing.
 deps:
 	@./scripts/fetch-deps.sh
 
-## Build the SwiftTerm static library and Swift module.
+## Build Ghostty's core (libghostty) — the primary terminal backend.
+## Needs the Zig toolchain (brew install zig).
+ghostty:
+	@./scripts/build-libghostty.sh
+
+## Build the SwiftTerm fallback library and Swift module.
 swiftterm:
 	@./scripts/build-swiftterm.sh
 
@@ -35,7 +40,7 @@ kill:
 
 clean:
 	@rm -rf build
-	@echo "==> cleaned"
+	@echo "==> cleaned (Vendor/ is kept; remove it by hand to re-fetch)"
 
 ## Full rebuild from scratch, including SwiftTerm.
 rebuild: clean app

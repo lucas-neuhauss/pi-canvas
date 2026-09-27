@@ -52,6 +52,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         NSApp.activate()
         installSignalHandlers()
 
+        #if GHOSTTY_TERMINAL
+        // Start libghostty before any node exists: it owns the process-wide app
+        // and the config that every surface inherits.
+        if !GhosttyApp.shared.start() {
+            NSLog("[PiCanvas] libghostty failed to start: %@", GhosttyApp.shared.startupError ?? "unknown")
+        } else {
+            NSLog(
+                "[PiCanvas] libghostty ready — font %@ at %.1fpt, %d config diagnostics",
+                GhosttyApp.shared.fontFamily ?? "(default)",
+                Double(GhosttyApp.shared.baseFontSize),
+                GhosttyApp.shared.diagnostics.count
+            )
+        }
+        #endif
+
         // Restore only once the window is on screen: terminals need a window
         // before their process starts.
         controller.restore()

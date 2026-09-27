@@ -7,6 +7,14 @@ import AppKit
 enum TerminalContentFactory {
     @MainActor
     static func make(spec: NodeSpec) -> AgentContent {
-        SwiftTermContent()
+        #if GHOSTTY_TERMINAL
+        // libghostty is the intended backend. If its process-wide state failed to
+        // initialise (a broken config, say), fall back rather than leaving the
+        // canvas unable to open a terminal.
+        if GhosttyApp.shared.isRunning {
+            return GhosttySurfaceContent()
+        }
+        #endif
+        return SwiftTermContent()
     }
 }

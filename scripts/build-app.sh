@@ -33,32 +33,47 @@ SWIFTTERM_LIB="$SWIFTTERM_DIR/libSwiftTerm.a"
 SWIFTTERM_MODULE="$SWIFTTERM_DIR/SwiftTerm.swiftmodule"
 
 if [[ ! -f "$SWIFTTERM_LIB" || ! -f "$SWIFTTERM_MODULE" ]]; then
-	echo "==> building SwiftTerm (missing artifacts)"
+	echo "==> building SwiftTerm (fallback terminal backend)"
 	"$ROOT/scripts/build-swiftterm.sh"
 fi
 
-echo "==> compiling $APP_NAME ($CONFIG)"
-mkdir -p "$MACOS_DIR" "$CONTENTS_DIR/Resources"
-cp "$ROOT/Resources/Info.plist" "$CONTENTS_DIR/Info.plist"
-printf 'APPL????' > "$CONTENTS_DIR/PkgInfo"
-
+# libghostty is the primary terminal backend; the SwiftTerm one is kept as a
+# fallback so the app still builds and runs before the Zig toolchain has been
+# used. The source set and the link line follow whichever is available.
+GHOSTTY_DIR="$BUILD_DIR/ghostty"
 SOURCES=()
+LINK_ARGS=(-I "$SWIFTTERM_DIR" -L "$SWIFTTERM_DIR" -lSwiftTerm)
+EXCLUDE_ARGS=()
+
+if [[ -f "$GHOSTTY_DIR/module.modulemap" && -f "$GHOSTTY_DIR/libghostty.a" ]]; then
+	echo "==> libghostty found: building with the Ghostty terminal backend"
+	LINK_ARGS+=(-I "$GHOSTTY_DIR" -L "$GHOSTTY_DIR" -lghostty)
+	SWIFT_FLAGS+=(-D GHOSTTY_TERMINAL)
+else
+	echo "==> libghostty not built yet: using the SwiftTerm backend"
+	echo "    (run ./scripts/build-libghostty.sh to build Ghostty's core)"
+	EXCLUDE_ARGS=(-not -path '*/Agent/Ghostty/*')
+fi
+
 while IFS= read -r file; do
 	SOURCES+=("$file")
-done < <(find "$ROOT/Sources/$APP_NAME" -name '*.swift' | sort)
+done < <(find "$ROOT/Sources/$APP_NAME" -name '*.swift' "${EXCLUDE_ARGS[@]}" | sort)
 
 if [[ ${#SOURCES[@]} -eq 0 ]]; then
 	echo "error: no Swift sources found" >&2
 	exit 1
 fi
 
+echo "==> compiling $APP_NAME ($CONFIG, ${#SOURCES[@]} files)"
+mkdir -p "$MACOS_DIR" "$CONTENTS_DIR/Resources"
+cp "$ROOT/Resources/Info.plist" "$CONTENTS_DIR/Info.plist"
+printf 'APPL????' > "$CONTENTS_DIR/PkgInfo"
+
 swiftc \
 	"${SWIFT_FLAGS[@]}" \
 	-module-name "$APP_NAME" \
-	-I "$SWIFTTERM_DIR" \
-	-L "$SWIFTTERM_DIR" \
+	"${LINK_ARGS[@]}" \
 	"${SOURCES[@]}" \
-	-lSwiftTerm \
 	-o "$MACOS_DIR/$APP_NAME"
 
 if command -v codesign >/dev/null 2>&1; then

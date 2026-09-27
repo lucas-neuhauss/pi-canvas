@@ -1,4 +1,13 @@
 import AppKit
+import Darwin
+
+/// PiCanvas may itself have been launched from inside a `pi` session. Strip the
+/// parent's agent identity before anything spawns a child: libghostty inherits
+/// this process's environment, so a nested `pi` would otherwise believe it
+/// belongs to the session that started PiCanvas.
+for key in ProcessInfo.processInfo.environment.keys where key.hasPrefix("PI_") {
+    unsetenv(key)
+}
 
 // Top-level code is not implicitly main-actor isolated in Swift 5 language
 // mode, but the process entry point genuinely runs on the main thread, so this
