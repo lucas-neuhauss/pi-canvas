@@ -88,10 +88,31 @@ Notable mappings:
 | --- | --- |
 | Launch a process | `ghostty_surface_config_s.command` — **always run through a shell**, so argv is shell-quoted |
 | Zoom scales text | `increase_font_size:<f32>` / `decrease_font_size:<f32>` binding actions, tracked exactly (there is no absolute setter) |
-| Scrollback snapshot | `ghostty_surface_read_text` + `free_text` (structured `ghostty_text_s`, styled cells available) |
+| Scrollback snapshot | `ghostty_surface_read_text` + `free_text`, over a `GHOSTTY_POINT_SCREEN` selection |
 | Scrollback restore | libghostty has no feed API, so the saved buffer is written to a temp file and `cat`-ed by the child's shell before exec |
 | Exit status | `GHOSTTY_ACTION_SHOW_CHILD_EXITED` / `GHOSTTY_ACTION_CLOSE_WINDOW` |
 | Session env | surface config `env_vars`; `PI_*` is unset at startup since libghostty inherits our environment |
+| Clipboard | `read_clipboard_cb` / `write_clipboard_cb`, plus `confirm_read_clipboard_cb` which denies program-initiated reads |
+
+### Details worth not re-learning
+
+- **The clipboard callbacks are mandatory.** Their fields are non-nullable in
+  Zig; passing NULL crashes as soon as a terminal touches the clipboard. Only
+  `close_surface_cb` may be NULL. All of them receive the *surface's* userdata
+  (our view pointer), not the app's.
+- **`ghostty_config_get` is not a general reader.** It returns false for
+  `font-family` and `cursor-color`, and the destination width must match the
+  field: `font-size` is a 32-bit `float`, so reading it into a `Double` yields
+  garbage in half the value. `GhosttyTheme` parses the config files directly
+  instead, which is also what the SwiftTerm fallback needs.
+- **`GHOSTTY_POINT_SURFACE` is not "the surface".** It is internally `history`
+  (scrollback only). Use `SCREEN` for a full snapshot, or it silently omits
+  whatever is on screen.
+- **libghostty owns the layer.** It installs its own `IOSurfaceLayer` on the view
+  and renders on its own schedule: no `CAMetalLayer`, no `wantsLayer`, no
+  `draw(_:)`, no `GHOSTTY_ACTION_RENDER` handling.
+- **Free surfaces before the app.** `ghostty_app_free` deinitialises whatever is
+  still registered, and a debug build asserts the font grid is empty.
 
 ## When Xcode is available
 

@@ -230,18 +230,23 @@ final class GhosttySurfaceView: NSView, NSTextInputClient {
     }
 
     /// The surface's text, used for scrollback snapshots.
+    ///
+    /// `GHOSTTY_POINT_SURFACE` is a trap: it is named `history` internally and
+    /// covers only the scrollback region, so a snapshot taken with it silently
+    /// omits what is on screen. `SCREEN` spans history through to the last
+    /// written row, which is what a snapshot should capture.
     func readText() -> String? {
         guard let surface else { return nil }
 
         var selection = ghostty_selection_s()
         selection.top_left = ghostty_point_s(
-            tag: GHOSTTY_POINT_SURFACE,
+            tag: GHOSTTY_POINT_SCREEN,
             coord: GHOSTTY_POINT_COORD_TOP_LEFT,
             x: 0,
             y: 0
         )
         selection.bottom_right = ghostty_point_s(
-            tag: GHOSTTY_POINT_SURFACE,
+            tag: GHOSTTY_POINT_SCREEN,
             coord: GHOSTTY_POINT_COORD_BOTTOM_RIGHT,
             x: 0,
             y: 0
@@ -254,6 +259,78 @@ final class GhosttySurfaceView: NSView, NSTextInputClient {
         guard let pointer = text.text, text.text_len > 0 else { return nil }
         let buffer = UnsafeRawBufferPointer(start: pointer, count: Int(text.text_len))
         return String(decoding: buffer, as: UTF8.self)
+    }
+
+    // MARK: - Clipboard
+
+    /// Reads the pasteboard for the MIME types the terminal asked for.
+    ///
+    /// Returning `STARTED` would mean completing later; we answer synchronously
+    /// from the general pasteboard, so only `UNAVAILABLE`/`UNSUPPORTED` are
+    /// returned without a completion.
+    func completeClipboardRead(
+        state: UnsafeMutableRawPointer,
+        mimes: UnsafePointer<UnsafePointer<CChar>?>?,
+        mimesLen: Int,
+        list: Bool
+    ) -> ghostty_clipboard_read_result_e {
+        guard let surface else { return GHOSTTY_CLIPBOARD_READ_UNAVAILABLE }
+
+        var wantsText = list
+        if !wantsText, let mimes {
+            for index in 0..<mimesLen {
+                guard let raw = mimes[index] else { continue }
+                let mime = String(cString: raw)
+                if mime == "text/plain" || mime.hasPrefix("text/") {
+                    wantsText = true
+                    break
+                }
+            }
+        }
+        guard wantsText else { return GHOSTTY_CLIPBOARD_READ_UNSUPPORTED }
+
+        let text = NSPasteboard.general.string(forType: .string) ?? ""
+
+        // A listing request wants the available representations, not the data.
+        if list {
+            guard !text.isEmpty else { return GHOSTTY_CLIPBOARD_READ_UNAVAILABLE }
+            return "text/plain".withCString { mimePointer in
+                var available: [UnsafePointer<CChar>?] = [mimePointer]
+                var complete = ghostty_clipboard_complete_s()
+                complete.confirmed = false
+                return available.withUnsafeMutableBufferPointer { buffer in
+                    complete.available = UnsafePointer(buffer.baseAddress)
+                    complete.available_len = buffer.count
+                    ghostty_surface_complete_clipboard_request(surface, &complete, state)
+                    return GHOSTTY_CLIPBOARD_READ_STARTED
+                }
+            }
+        }
+
+        guard !text.isEmpty else { return GHOSTTY_CLIPBOARD_READ_UNAVAILABLE }
+
+        return text.withCString { textPointer in
+            "text/plain".withCString { mimePointer in
+                var content = ghostty_clipboard_content_s(
+                    mime: mimePointer,
+                    data: textPointer,
+                    len: text.utf8.count
+                )
+                var complete = ghostty_clipboard_complete_s()
+                complete.confirmed = false
+                return withUnsafeMutablePointer(to: &content) { contentPointer in
+                    complete.contents = UnsafePointer(contentPointer)
+                    complete.contents_len = 1
+                    ghostty_surface_complete_clipboard_request(surface, &complete, state)
+                    return GHOSTTY_CLIPBOARD_READ_STARTED
+                }
+            }
+        }
+    }
+
+    func denyClipboardRequest(_ state: UnsafeMutableRawPointer) {
+        guard let surface else { return }
+        ghostty_surface_deny_clipboard_request(surface, state)
     }
 
     // MARK: - Actions from libghostty

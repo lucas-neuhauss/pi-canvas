@@ -112,20 +112,24 @@ extension NSEvent {
 /// on the key's type.
 enum GhosttyConfigReader {
 
+    /// `ghostty_config_get` writes the field's own width, so the destination must
+    /// match: `font-size` is a 32-bit float, not a double. Reading it into a
+    /// Double would leave half the value as garbage.
+    static func float(_ config: ghostty_config_t?, _ key: String, fallback: Float) -> Float {
+        guard let config else { return fallback }
+        var value: Float = fallback
+        let ok = ghostty_config_get(config, &value, key, UInt(key.utf8.count))
+        return ok ? value : fallback
+    }
+
+    /// Only some keys are readable this way — `font-family` and `cursor-color`
+    /// return false (verified upstream), which is why `GhosttyTheme` parses the
+    /// config files directly.
     static func double(_ config: ghostty_config_t?, _ key: String, fallback: Double) -> Double {
         guard let config else { return fallback }
         var value: Double = fallback
         let ok = ghostty_config_get(config, &value, key, UInt(key.utf8.count))
         return ok ? value : fallback
-    }
-
-    static func string(_ config: ghostty_config_t?, _ key: String) -> String? {
-        guard let config else { return nil }
-        var value: UnsafePointer<CChar>?
-        let ok = ghostty_config_get(config, &value, key, UInt(key.utf8.count))
-        guard ok, let value else { return nil }
-        let string = String(cString: value)
-        return string.isEmpty ? nil : string
     }
 }
 
@@ -173,17 +177,43 @@ final class GhosttyApp {
         }
         self.config = config
 
-        baseFontSize = CGFloat(GhosttyConfigReader.double(config, "font-size", fallback: 13))
-        fontFamily = GhosttyConfigReader.string(config, "font-family")
+        // `font-size` is a float in the config; `font-family` is not readable
+        // through the C API, so the family comes from our own config parser.
+        baseFontSize = CGFloat(GhosttyConfigReader.float(config, "font-size", fallback: 13))
+        fontFamily = GhosttyTheme.current.fontFamily
 
         var runtime = ghostty_runtime_config_s(
             userdata: Unmanaged.passUnretained(self).toOpaque(),
             supports_selection_clipboard: true,
             wakeup_cb: { _ in GhosttyApp.wakeup() },
             action_cb: { _, target, action in GhosttyApp.dispatch(target: target, action: action) },
-            read_clipboard_cb: nil,
-            confirm_read_clipboard_cb: nil,
-            write_clipboard_cb: nil,
+            read_clipboard_cb: { userdata, location, state, mimes, mimesLen, list in
+                GhosttyApp.readClipboard(
+                    userdata: userdata,
+                    location: location,
+                    state: state,
+                    mimes: mimes,
+                    mimesLen: mimesLen,
+                    list: list
+                )
+            },
+            confirm_read_clipboard_cb: { userdata, confirm, state, request in
+                GhosttyApp.confirmReadClipboard(
+                    userdata: userdata,
+                    confirm: confirm,
+                    state: state,
+                    request: request
+                )
+            },
+            write_clipboard_cb: { userdata, location, contents, count, confirm in
+                GhosttyApp.writeClipboard(
+                    userdata: userdata,
+                    location: location,
+                    contents: contents,
+                    count: count,
+                    confirm: confirm
+                )
+            },
             close_surface_cb: nil
         )
 
@@ -246,5 +276,76 @@ final class GhosttyApp {
         // applied after creation with the font-size binding action instead.
         _ = fontSize
         return clone
+    }
+
+    // MARK: - Clipboard
+    //
+    // These three callbacks are *not* optional: the fields are non-nullable in
+    // Zig, so passing NULL crashes the moment a terminal touches the clipboard.
+    // All three receive the *surface's* userdata, which for us is the view.
+
+    private static func view(for userdata: UnsafeMutableRawPointer?) -> GhosttySurfaceView? {
+        guard let userdata else { return nil }
+        return Unmanaged<GhosttySurfaceView>.fromOpaque(userdata).takeUnretainedValue()
+    }
+
+    static func readClipboard(
+        userdata: UnsafeMutableRawPointer?,
+        location: ghostty_clipboard_e,
+        state: UnsafeMutableRawPointer?,
+        mimes: UnsafePointer<UnsafePointer<CChar>?>?,
+        mimesLen: Int,
+        list: Bool
+    ) -> ghostty_clipboard_read_result_e {
+        MainActor.assumeIsolated {
+            guard let view = view(for: userdata), let state else {
+                return GHOSTTY_CLIPBOARD_READ_UNAVAILABLE
+            }
+            return view.completeClipboardRead(state: state, mimes: mimes, mimesLen: mimesLen, list: list)
+        }
+    }
+
+    static func confirmReadClipboard(
+        userdata: UnsafeMutableRawPointer?,
+        confirm: UnsafePointer<ghostty_clipboard_confirm_s>?,
+        state: UnsafeMutableRawPointer?,
+        request: ghostty_clipboard_request_e
+    ) {
+        MainActor.assumeIsolated {
+            // A program asking to read our clipboard (OSC 52 / kitty) needs
+            // consent we cannot yet ask for, so deny rather than leak silently.
+            guard let view = view(for: userdata), let state else { return }
+            view.denyClipboardRequest(state)
+        }
+    }
+
+    static func writeClipboard(
+        userdata: UnsafeMutableRawPointer?,
+        location: ghostty_clipboard_e,
+        contents: UnsafePointer<ghostty_clipboard_content_s>?,
+        count: Int,
+        confirm: Bool
+    ) {
+        MainActor.assumeIsolated {
+            // `confirm` means a program is writing our clipboard; without a prompt
+            // to ask the user, ignore it. A copy made in the terminal does not ask.
+            guard !confirm, let contents, count > 0 else { return }
+
+            var text: String?
+            for index in 0..<count {
+                let content = contents[index]
+                guard let mime = content.mime, let data = content.data else { continue }
+                let type = String(cString: mime)
+                guard type == "text/plain" || type.hasPrefix("text/") else { continue }
+                let buffer = UnsafeRawBufferPointer(start: data, count: content.len)
+                text = String(decoding: buffer, as: UTF8.self)
+                break
+            }
+            guard let text, !text.isEmpty else { return }
+
+            let pasteboard = NSPasteboard.general
+            pasteboard.clearContents()
+            pasteboard.setString(text, forType: .string)
+        }
     }
 }
