@@ -122,6 +122,7 @@ enum SelfTest {
         testZOrder(canvas: canvas, controller: controller, checker: checker)
         testPiSessionBinding(checker: checker)
         testAgentStatusWatcher(checker: checker)
+        testGhosttyConfig(checker: checker)
         testAttentionAndJump(checker: checker)
         testScrollbackPersistence(checker: checker)
         testTerminalRoundTrip(checker: checker)
@@ -565,6 +566,102 @@ enum SelfTest {
         )
 
         watcher.stop()
+        try? FileManager.default.removeItem(at: root)
+    }
+
+    /// The terminal should look like the user's Ghostty, so the config parser is
+    /// worth testing properly: it is pure string handling with a lot of edges.
+    private static func testGhosttyConfig(checker: Checker) {
+        print("\nghostty config")
+
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("picanvas-config-\(UUID().uuidString)", isDirectory: true)
+        let themes = root.appendingPathComponent("themes", isDirectory: true)
+        try? FileManager.default.createDirectory(at: themes, withIntermediateDirectories: true)
+
+        // Colours.
+        checker.equal(GhosttyTheme.color("#ff8800")?.redComponent, 1.0, "#rrggbb parses")
+        checker.close(CGFloat(GhosttyTheme.color("#ff8800")?.greenComponent ?? 0), 0.533, 0.01, "green component")
+        checker.equal(GhosttyTheme.color("#f80")?.redComponent, 1.0, "#rgb shorthand parses")
+        checker.equal(GhosttyTheme.color("red")?.greenComponent, 0.0, "named colours parse")
+        checker.check(GhosttyTheme.color("not-a-colour") == nil, "garbage colours are rejected")
+        checker.equal(GhosttyTheme.boolean("true"), true, "booleans parse")
+        checker.equal(GhosttyTheme.boolean("false"), false, "false parses")
+
+        // A theme file, included by name.
+        let themeFile = themes.appendingPathComponent("my-theme")
+        try? """
+        background = #101010
+        foreground = #f0f0f0
+        palette = 0=#000000,1=#cc0000
+        cursor-color = #F1FA8C
+        """.write(to: themeFile, atomically: true, encoding: .utf8)
+
+        // An included config, pulled in with config-file.
+        let included = root.appendingPathComponent("included")
+        try? "font-size = 15\ncursor-style = bar\n".write(to: included, atomically: true, encoding: .utf8)
+
+        let main = root.appendingPathComponent("config")
+        try? """
+        # a comment
+        font-family = "Maple Mono NF, Menlo"
+        font-size = 14
+        cursor-style = block
+        cursor-style-blink = false
+        theme = my-theme
+        palette = 2=#00cc00
+        config-file = ./included
+        config-file = ?./does-not-exist
+        macos-window-buttons = hidden
+        """.write(to: main, atomically: true, encoding: .utf8)
+
+        let theme = GhosttyTheme.load(configPaths: [main], themeDirectories: [themes])
+
+        checker.equal(theme.fontFamily, "Maple Mono NF", "font family takes the first of a list")
+        checker.equal(theme.fontSize, 15, "an included file overrides the top-level value")
+        checker.close(CGFloat(theme.cursorColor?.redComponent ?? 0), 0.9451, 0.001, "cursor colour from the theme")
+        checker.equal(theme.cursorStyle?.shapeName, "bar", "the include's cursor shape wins")
+        checker.equal(theme.cursorStyle?.blink, false, "blink is carried through")
+        checker.close(CGFloat(theme.background?.redComponent ?? 0), 0.0627, 0.001, "theme background")
+        checker.close(CGFloat(theme.foreground?.redComponent ?? 0), 0.9412, 0.001, "theme foreground")
+        checker.equal(theme.palette[0]?.redComponent, 0.0, "theme palette entry 0")
+        checker.close(CGFloat(theme.palette[1]?.redComponent ?? 0), 0.8, 0.001, "theme palette entry 1")
+        checker.close(CGFloat(theme.palette[2]?.greenComponent ?? 0), 0.8, 0.001, "palette entry from the main file")
+        checker.check(theme.paletteColors16 == nil, "an incomplete palette is not installed")
+        checker.check(theme.warnings.isEmpty, "no warnings for a well-formed config (got \(theme.warnings))")
+        checker.equal(theme.sources.count, 3, "main, theme and include were all read")
+
+        // Optional includes that are missing are fine; required ones warn.
+        let strict = root.appendingPathComponent("strict")
+        try? "config-file = ./nope\n".write(to: strict, atomically: true, encoding: .utf8)
+        checker.equal(
+            GhosttyTheme.load(configPaths: [strict], themeDirectories: [themes]).warnings.count,
+            1,
+            "a missing required include warns"
+        )
+
+        // A full 16-colour palette is accepted.
+        let paletteFile = root.appendingPathComponent("palette")
+        let entries = (0..<16).map { "palette = \($0)=#010203" }.joined(separator: "\n")
+        try? (entries + "\n").write(to: paletteFile, atomically: true, encoding: .utf8)
+        let full = GhosttyTheme.load(configPaths: [paletteFile], themeDirectories: [themes])
+        checker.equal(full.paletteColors16?.count, 16, "a full palette resolves to 16 colours")
+
+        checker.check(
+            GhosttyTheme.load(configPaths: [], themeDirectories: []).isEmpty,
+            "no config means no overrides"
+        )
+
+        // Diagnostic: what the user's own config resolves to on this machine.
+        let userTheme = GhosttyTheme.current
+        if !userTheme.isEmpty {
+            print("  ---- from \(userTheme.sources.joined(separator: ", "))")
+            print("       font: \(userTheme.fontFamily ?? "(unset)") @ \(userTheme.fontSize.map { String(format: "%.1f", $0) } ?? "(unset)")")
+            print("       cursor: \(userTheme.cursorStyle.map { "\($0.shapeName)\($0.blink ? " blinking" : "")" } ?? "(unset)")\(userTheme.cursorColor != nil ? " coloured" : "")")
+        } else {
+            print("  ---- no user ghostty config found")
+        }
+
         try? FileManager.default.removeItem(at: root)
     }
 

@@ -39,22 +39,34 @@ final class SwiftTermContent: AgentContent {
     /// How long to wait for SIGTERM to be honoured before escalating to SIGKILL.
     private static let killEscalationDelay: TimeInterval = 2.0
 
-    init() {
-        // `TerminalOptions` has no public memberwise initialiser, so start from
-        // the library's default and adjust the fields we care about.
+    init(theme: GhosttyTheme = .current) {
+        let fontSize = theme.fontSize ?? SwiftTermContent.defaultBaseFontSize
+        // Start from the library's default and adjust the fields we care about.
         var options = TerminalOptions.default
         options.scrollback = 10_000
         options.termName = "xterm-256color"
+        if let cursor = theme.cursorStyle {
+            options.cursorStyle = SwiftTermContent.cursorStyle(cursor)
+        }
 
         let terminal = LocalProcessTerminalView(
             frame: .zero,
-            font: SwiftTermContent.terminalFont,
+            font: SwiftTermContent.font(family: theme.fontFamily, size: fontSize),
             options: options
         )
-        terminal.nativeBackgroundColor = SwiftTermContent.backgroundColor
-        terminal.nativeForegroundColor = SwiftTermContent.foregroundColor
-        terminal.caretColor = SwiftTermContent.caretColor
-        terminal.selectedTextBackgroundColor = SwiftTermContent.selectionColor
+
+        // The user's Ghostty theme, when there is one.
+        terminal.nativeBackgroundColor = theme.background ?? SwiftTermContent.defaultBackgroundColor
+        terminal.nativeForegroundColor = theme.foreground ?? SwiftTermContent.defaultForegroundColor
+        terminal.caretColor = theme.cursorColor ?? SwiftTermContent.defaultCaretColor
+        terminal.selectedTextBackgroundColor = theme.selectionBackground ?? SwiftTermContent.defaultSelectionColor
+        if let selectionForeground = theme.selectionForeground {
+            terminal.selectedTextForegroundColor = selectionForeground
+        }
+        if let palette = theme.paletteColors16 {
+            terminal.installColors(palette.map(SwiftTermContent.terminalColor))
+        }
+
         // A canvas full of terminals should scroll its own content, not the page.
         terminal.scrollSensitivity = 1.0
         // Small tabs, not a chunky scroller, inside a node.
@@ -62,35 +74,69 @@ final class SwiftTermContent: AgentContent {
 
         self.terminal = terminal
         self.view = terminal
+        self.baseFontSize = fontSize
+        self.appliedFontSize = fontSize
+        self.theme = theme
         terminal.processDelegate = self
     }
 
     // MARK: - Appearance
 
-    static let terminalFont: NSFont = {
-        NSFont(name: "Menlo", size: baseFontSize) ?? NSFont.monospacedSystemFont(ofSize: baseFontSize, weight: .regular)
-    }()
-
-    /// Font size at 100% zoom.
-    static let baseFontSize: CGFloat = 12.5
+    /// Font size at 100% zoom when the user's config says nothing.
+    static let defaultBaseFontSize: CGFloat = 12.5
     /// Below this the cell metrics get silly; above it a node stops looking like
     /// a terminal.
     static let minFontSize: CGFloat = 4
     static let maxFontSize: CGFloat = 30
 
+    /// The resolved Ghostty theme this node was created with.
+    private let theme: GhosttyTheme
+    /// Font size at 100% zoom, from the user's config.
+    private let baseFontSize: CGFloat
+
+    /// An installed font by family name, or the system monospaced face.
+    static func font(family: String?, size: CGFloat) -> NSFont {
+        if let family, !family.isEmpty, let font = NSFont(name: family, size: size) {
+            return font
+        }
+        return NSFont(name: "Menlo", size: size)
+            ?? NSFont.monospacedSystemFont(ofSize: size, weight: .regular)
+    }
+
+    static func cursorStyle(_ style: SwiftTermCursorStyle) -> SwiftTerm.CursorStyle {
+        switch (style.shapeName, style.blink) {
+        case ("bar", true): return .blinkBar
+        case ("bar", false): return .steadyBar
+        case ("underline", true): return .blinkUnderline
+        case ("underline", false): return .steadyUnderline
+        case (_, true): return .blinkBlock
+        default: return .steadyBlock
+        }
+    }
+
+    /// SwiftTerm takes 8-bit sRGB components.
+    static func terminalColor(_ color: NSColor) -> SwiftTerm.Color {
+        let srgb = color.usingColorSpace(.sRGB) ?? color
+        let red = UInt16((max(0, min(1, srgb.redComponent)) * 255).rounded())
+        let green = UInt16((max(0, min(1, srgb.greenComponent)) * 255).rounded())
+        let blue = UInt16((max(0, min(1, srgb.blueComponent)) * 255).rounded())
+        return SwiftTerm.Color(red8: red, green8: green, blue8: blue)
+    }
+
     /// Last font size actually applied, so we can skip redundant work.
-    private var appliedFontSize: CGFloat = SwiftTermContent.baseFontSize
+    private var appliedFontSize: CGFloat = SwiftTermContent.defaultBaseFontSize
 
     /// Current glyph size, for diagnostics and tests.
     var contentFontSize: CGFloat { appliedFontSize }
 
     /// The scale last accepted by `setContentScale`.
-    var contentScale: CGFloat { appliedFontSize / SwiftTermContent.baseFontSize }
+    var contentScale: CGFloat { appliedFontSize / baseFontSize }
 
-    static let backgroundColor = NSColor(srgbRed: 0.055, green: 0.058, blue: 0.067, alpha: 1)
-    static let foregroundColor = NSColor(srgbRed: 0.82, green: 0.84, blue: 0.87, alpha: 1)
-    static let caretColor = NSColor(srgbRed: 0.45, green: 0.70, blue: 1.0, alpha: 1)
-    static let selectionColor = NSColor(srgbRed: 0.42, green: 0.60, blue: 0.98, alpha: 0.35)
+    /// PiCanvas's own dark look, used for anything the user's config does not set.
+    static let defaultBackgroundColor = NSColor(srgbRed: 0.055, green: 0.058, blue: 0.067, alpha: 1)
+    static let defaultForegroundColor = NSColor(srgbRed: 0.82, green: 0.84, blue: 0.87, alpha: 1)
+    static let defaultCaretColor = NSColor(srgbRed: 0.45, green: 0.70, blue: 1.0, alpha: 1)
+    static let defaultSelectionColor = NSColor(srgbRed: 0.42, green: 0.60, blue: 0.98, alpha: 0.35)
 
     // MARK: - AgentContent
 
@@ -153,7 +199,7 @@ final class SwiftTermContent: AgentContent {
     /// the font and the node's pixel size scale together, the grid (cols × rows)
     /// stays essentially constant — resizing a node is what reveals more content.
     func setContentScale(_ scale: CGFloat) {
-        let target = min(max(SwiftTermContent.baseFontSize * scale, SwiftTermContent.minFontSize), SwiftTermContent.maxFontSize)
+        let target = min(max(baseFontSize * scale, SwiftTermContent.minFontSize), SwiftTermContent.maxFontSize)
         // Quantise so a pinch does not rebuild the font on every event.
         let quantised = (target * 4).rounded() / 4
         guard abs(quantised - appliedFontSize) > 0.01 else { return }

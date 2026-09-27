@@ -15,14 +15,45 @@ restarts.
 ## Build and run
 
 ```sh
-make deps     # fetch vendored SwiftTerm (once)
-make app      # build build/PiCanvas.app
+make deps     # fetch vendored sources (SwiftTerm fallback; Ghostty's core)
+make ghostty  # build libghostty (needs the Zig toolchain AND Xcode's Metal
+              # compiler — see docs/LIBGHOSTTY_STATUS.md)
+make app      # build build/PiCanvas.app (uses libghostty when present)
 make run      # build and run with logs on stdout
 make open     # build and open as a normal app
 ```
 
 Requirements: macOS 14+, Apple Command Line Tools. **Xcode is not required.**
 There is no `.xcodeproj` and no `Package.swift`.
+
+## Appearance follows your Ghostty config
+
+Terminals are not themed by PiCanvas; they are themed by Ghostty's own config.
+Keys honoured: `font-family` (first of a fallback list), `font-size`,
+`cursor-color`, `cursor-style`, `cursor-style-blink`, `background`,
+`foreground`, `selection-background`, `selection-foreground`,
+`palette = N=#hex`, `theme = <name>` (resolved from the themes bundled inside
+Ghostty.app, or your own themes directory), and `config-file` includes
+(including the optional `?` form). Both config locations are read: the XDG one
+and `~/Library/Application Support/com.mitchellh.ghostty/config`.
+
+Anything the config does not set falls back to PiCanvas's own dark palette.
+One known gap: when a config specifies no colours at all, Ghostty would use its
+compiled-in defaults, which are not readable from a file. The libghostty backend
+applies them for real; the SwiftTerm fallback uses PiCanvas's dark colours
+instead.
+
+What maps where:
+
+| Your config | libghostty backend | SwiftTerm fallback |
+| --- | --- | --- |
+| font-family / font-size | yes | yes |
+| cursor colour / shape / blink | yes | yes |
+| background, foreground, selection | yes | yes |
+| `palette` (16 colours) | yes | yes |
+| `theme = <name>` | yes | yes (from Ghostty's bundled themes) |
+| ligatures, `font-thicken` | yes | **no** — SwiftTerm has no equivalent |
+| keybinds, shell integration | yes | no (not applicable) |
 
 ## Keyboard
 
@@ -150,10 +181,11 @@ to iterate on and has no external moving parts.
 ## Testing
 
 ```sh
-# 128 checks: coordinate maths, zoom anchoring, drag, resize from every border,
+# 152 checks: coordinate maths, zoom anchoring, drag, resize from every border,
 # delete, persistence round-trip, process launch, session binding, the agent
 # status state machine, the needs-you indicator and jump, scrollback
-# snapshot/restore, zoom-vs-resize behaviour, and three real-PTY tests
+# snapshot/restore, zoom-vs-resize behaviour, Ghostty config parsing, and three
+# real-PTY tests
 ./build/PiCanvas.app/Contents/MacOS/PiCanvas --self-test
 
 # Render a window with two nodes to PNG without a display server
