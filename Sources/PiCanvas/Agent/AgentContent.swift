@@ -29,6 +29,11 @@ protocol AgentContent: AnyObject {
     /// Show or hide the focused appearance.
     func setFocused(_ focused: Bool)
 
+    // MARK: Diagnostics
+
+    /// Last grid size the terminal reported, or `(0, 0)` when unknown.
+    var reportedGrid: (cols: Int, rows: Int) { get }
+
     // MARK: Scrollback persistence (optional; implemented where supported)
 
     var supportsScrollbackSnapshot: Bool { get }
@@ -37,6 +42,7 @@ protocol AgentContent: AnyObject {
 }
 
 extension AgentContent {
+    var reportedGrid: (cols: Int, rows: Int) { (0, 0) }
     var supportsScrollbackSnapshot: Bool { false }
     func snapshotScrollback() -> Data? { nil }
     func restoreScrollback(_ data: Data) {}

@@ -12,6 +12,7 @@ final class CanvasController: NSObject {
 
     private(set) var specs: [UUID: NodeSpec] = [:]
     private var contents: [UUID: AgentContent] = [:]
+    private var watchers: [UUID: PiSessionWatcher] = [:]
     private var cascadeIndex = 0
 
     /// Creates the terminal for a node. Injected so the canvas does not depend on
@@ -168,9 +169,16 @@ final class CanvasController: NSObject {
         node.contentView = content.view
         canvas.addNodeView(node)
 
+        // Give the terminal its real pixel size before anything spawns, so the
+        // PTY is created with the right grid instead of 0x0 and catching up.
+        node.layoutSubtreeIfNeeded()
+
         if start {
-            content.start(ProcessResolver.request(for: spec))
+            let request = ProcessResolver.request(for: spec)
+            NSLog("[PiCanvas] node %@ start kind=%@ cwd=%@ argv=%@", spec.id.uuidString, spec.kind.rawValue, request.workingDirectory, request.arguments.joined(separator: " "))
+            content.start(request)
         }
+        startStatusWatcher(for: spec, node: node)
         if select {
             canvas.select(node, focusContent: true)
         }
@@ -190,13 +198,14 @@ final class CanvasController: NSObject {
 
         content.onExit = { [weak self] code in
             guard let self, let node = self.canvas.nodeView(withID: id) else { return }
-            if let code {
-                node.statusText = code == 0 ? "exited" : "exited \(code)"
-                node.statusIsWarning = code != 0
-            } else {
-                node.statusText = "terminated"
-                node.statusIsWarning = true
-            }
+            // The process is gone; the transcript is no longer a live status.
+            self.watchers[id]?.stop()
+            self.watchers[id] = nil
+            let describing = code.map { "exit \($0)" } ?? "killed by signal"
+            let grid = content.reportedGrid
+            NSLog("[PiCanvas] node %@ terminated: %@ (grid %dx%d)", id.uuidString, describing, grid.cols, grid.rows)
+            node.statusKind = (code == 0) ? .idle : .failure
+            node.statusText = code.map { $0 == 0 ? "exited" : "exited \($0)" } ?? "stopped"
             self.onStateChange?()
         }
 
@@ -213,6 +222,8 @@ final class CanvasController: NSObject {
 
     func close(nodeID: UUID) {
         guard let node = canvas.nodeView(withID: nodeID) else { return }
+        watchers[nodeID]?.stop()
+        watchers[nodeID] = nil
         contents[nodeID]?.terminate()
         contents[nodeID] = nil
         canvas.removeNodeView(node)
@@ -230,11 +241,48 @@ final class CanvasController: NSObject {
     }
 
     func terminateAll() {
+        for watcher in watchers.values {
+            watcher.stop()
+        }
+        watchers.removeAll()
         for content in contents.values {
             content.terminate()
         }
         contents.removeAll()
         saveNow()
+    }
+
+    // MARK: - Agent status
+
+    /// pi nodes get a watcher on their session file, which is how a node can say
+    /// "bash" or "needs you" without the canvas talking to the agent at all.
+    private func startStatusWatcher(for spec: NodeSpec, node: NodeFrameView) {
+        guard spec.kind == .pi, let sessionID = spec.sessionID else { return }
+        let id = spec.id
+        let watcher = PiSessionWatcher(
+            workingDirectory: spec.workingDirectory,
+            sessionID: sessionID
+        ) { [weak self] state in
+            self?.apply(agentState: state, to: id)
+        }
+        watchers[id] = watcher
+        node.statusText = watcher.state.displayText
+        node.statusKind = watcher.state.statusKind
+        watcher.start()
+    }
+
+    private func apply(agentState state: PiAgentState, to nodeID: UUID) {
+        guard let node = canvas.nodeView(withID: nodeID) else { return }
+        node.statusText = state.displayText
+        node.statusKind = state.statusKind
+
+        // An agent that has finished and wants a human should get attention even
+        // if the user is looking at something else. A single Dock bounce is a
+        // signal, not a nuisance.
+        if state == .waitingForYou, !NSApp.isActive, canvas.focusedNodeID != nodeID {
+            NSApp.requestUserAttention(.informationalRequest)
+        }
+        onStateChange?()
     }
 
     // MARK: - Viewport

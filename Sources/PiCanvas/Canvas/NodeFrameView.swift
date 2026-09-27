@@ -11,6 +11,40 @@ protocol NodeFrameViewDelegate: AnyObject {
     func nodeFrameViewDidTakeFirstResponder(_ node: NodeFrameView)
 }
 
+/// How a node's status pill is coloured.
+enum NodeStatusKind {
+    case idle
+    case running
+    case needsAttention
+    case failure
+
+    /// Text and background colours for the pill.
+    var colors: (text: NSColor, background: NSColor) {
+        switch self {
+        case .idle:
+            return (
+                NSColor(srgbRed: 0.72, green: 0.76, blue: 0.82, alpha: 1),
+                NSColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.08)
+            )
+        case .running:
+            return (
+                NSColor(srgbRed: 1.0, green: 0.78, blue: 0.38, alpha: 1),
+                NSColor(srgbRed: 1.0, green: 0.72, blue: 0.3, alpha: 0.14)
+            )
+        case .needsAttention:
+            return (
+                NSColor(srgbRed: 0.55, green: 0.92, blue: 0.66, alpha: 1),
+                NSColor(srgbRed: 0.4, green: 0.9, blue: 0.6, alpha: 0.16)
+            )
+        case .failure:
+            return (
+                NSColor(srgbRed: 1.0, green: 0.55, blue: 0.45, alpha: 1),
+                NSColor(srgbRed: 1, green: 0.45, blue: 0.4, alpha: 0.14)
+            )
+        }
+    }
+}
+
 /// Sizes for a node's chrome, in *screen pixels* — deliberately not scaled by
 /// zoom, so title bars and buttons stay usable at every zoom level while the
 /// terminal inside reflows to fill whatever pixel area remains.
@@ -45,11 +79,11 @@ final class NodeFrameView: NSView {
     var kind: NodeKind = .shell {
         didSet { needsDisplay = true }
     }
-    /// Optional status pill, e.g. "exited (1)".
+    /// Optional status pill, e.g. "needs you" or "exited (1)".
     var statusText: String? {
         didSet { if statusText != oldValue { needsDisplay = true } }
     }
-    var statusIsWarning = false {
+    var statusKind: NodeStatusKind = .idle {
         didSet { needsDisplay = true }
     }
 
@@ -328,11 +362,10 @@ final class NodeFrameView: NSView {
         var textRightLimit = close.minX - 6
         if let statusText, !statusText.isEmpty {
             let font = NSFont.systemFont(ofSize: 10, weight: .medium)
+            let colors = statusKind.colors
             let attributes: [NSAttributedString.Key: Any] = [
                 .font: font,
-                .foregroundColor: statusIsWarning
-                    ? NSColor(srgbRed: 1.0, green: 0.55, blue: 0.45, alpha: 1)
-                    : NSColor(srgbRed: 0.6, green: 0.9, blue: 0.7, alpha: 1)
+                .foregroundColor: colors.text
             ]
             let textSize = (statusText as NSString).size(withAttributes: attributes)
             let pillWidth = textSize.width + 12
@@ -344,9 +377,7 @@ final class NodeFrameView: NSView {
                 height: pillHeight
             )
             let pillPath = NSBezierPath(roundedRect: pillRect, xRadius: pillHeight / 2, yRadius: pillHeight / 2)
-            (statusIsWarning
-                ? NSColor(srgbRed: 1, green: 0.45, blue: 0.4, alpha: 0.14)
-                : NSColor(srgbRed: 0.4, green: 0.9, blue: 0.6, alpha: 0.12)).setFill()
+            colors.background.setFill()
             pillPath.fill()
             (statusText as NSString).draw(
                 in: CGRect(x: pillRect.minX + 6, y: pillRect.minY + 2, width: textSize.width, height: textSize.height),

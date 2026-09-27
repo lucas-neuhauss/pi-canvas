@@ -133,6 +133,8 @@ final class TerminalContent: AgentContent {
         // The node's border communicates focus; nothing to do inside the terminal.
     }
 
+    var reportedGrid: (cols: Int, rows: Int) { (lastReportedCols, lastReportedRows) }
+
     /// Type text into the running process (used by future automation hooks).
     func send(text: String) {
         terminal.send(txt: text)

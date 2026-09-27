@@ -120,6 +120,8 @@ enum SelfTest {
         testDelete(canvas: canvas, controller: controller, recorder: recorder, checker: checker)
         testPersistence(canvas: canvas, controller: controller, layoutURL: layoutURL, checker: checker)
         testZOrder(canvas: canvas, controller: controller, checker: checker)
+        testPiSessionBinding(checker: checker)
+        testAgentStatusWatcher(checker: checker)
         testTerminalRoundTrip(checker: checker)
         testResizeReflow(checker: checker)
 
@@ -349,6 +351,167 @@ enum SelfTest {
     }
 
     // MARK: - Real PTY round trip
+
+    /// `pi` nodes must own a pi session from the moment they are created, so a
+    /// restart resumes the conversation instead of starting a blank agent.
+    private static func testPiSessionBinding(checker: Checker) {
+        print("\npi session binding")
+
+        let spec = ProcessResolver.makeSpec(
+            kind: .pi,
+            workingDirectory: "/Users/someone/Project Name",
+            worldFrame: CGRect(x: 0, y: 0, width: 100, height: 100)
+        )
+        guard let sessionID = spec.sessionID else {
+            checker.check(false, "pi spec carries a session id")
+            return
+        }
+        checker.check(true, "pi spec carries a session id")
+        checker.equal(sessionID, sessionID.lowercased(), "session id is lower case")
+        checker.equal(sessionID.count, 36, "session id is a UUID")
+        checker.check(UUID(uuidString: sessionID) != nil, "session id parses as a UUID")
+
+        let command = spec.arguments.last ?? ""
+        checker.check(command.hasPrefix("exec pi "), "the login shell execs pi")
+        checker.check(command.contains("--session-id '\(sessionID)'"), "the session id is passed to pi")
+        checker.check(command.contains("--name '"), "the session is named")
+        checker.check(!command.contains("Project Name"), "session names are sanitised for the shell")
+
+        let other = ProcessResolver.makeSpec(
+            kind: .pi,
+            workingDirectory: "/Users/someone/Project Name",
+            worldFrame: CGRect(x: 0, y: 0, width: 100, height: 100)
+        )
+        checker.check(other.sessionID != sessionID, "two agents in one directory get separate sessions")
+
+        let name = ProcessResolver.sessionName(
+            workingDirectory: "/Users/someone/Project Name",
+            sessionID: sessionID
+        )
+        checker.check(name.contains("Project-Name"), "session name keeps a readable directory hint")
+        checker.check(!name.contains(" "), "session name has no spaces")
+        checker.equal(name, ProcessResolver.sessionName(workingDirectory: "/Users/someone/Project Name", sessionID: sessionID), "session name is stable")
+
+        // And it must survive a save/load cycle, or restore would start fresh.
+        let layoutURL = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("picanvas-session-test.json")
+        let store = LayoutStore(fileURL: layoutURL)
+        store.saveNow(LayoutFile(lastWorkingDirectory: "/tmp", nodes: [spec]))
+        checker.equal(store.load()?.nodes.first?.sessionID, sessionID, "session id survives persistence")
+
+        let shell = ProcessResolver.makeSpec(
+            kind: .shell,
+            workingDirectory: "/tmp",
+            worldFrame: .zero
+        )
+        checker.check(shell.sessionID == nil, "shell nodes have no pi session")
+    }
+
+    /// The agent status is derived purely from pi's session transcript, so the
+    /// state machine and the file tailing both need to be right.
+    private static func testAgentStatusWatcher(checker: Checker) {
+        print("\npi agent status watcher")
+
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("picanvas-watch-\(UUID().uuidString)", isDirectory: true)
+        let cwd = "/Users/someone/Project Name"
+        let directory = PiSessionWatcher.sessionDirectory(for: cwd, under: root)
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+
+        checker.equal(
+            PiSessionWatcher.sessionDirectory(for: "/tmp", under: root).lastPathComponent,
+            "--private-tmp--",
+            "session directory resolves symlinks the way pi does"
+        )
+        checker.equal(
+            PiSessionWatcher.sessionDirectory(for: "/Users/me/a:b", under: root).lastPathComponent,
+            "--Users-me-a-b--",
+            "session directory replaces colons like pi does"
+        )
+        checker.equal(
+            directory.lastPathComponent,
+            "--Users-someone-Project Name--",
+            "session directory slug matches pi's grouping (spaces preserved)"
+        )
+
+        let sessionID = "11112222-3333-4444-5555-666677778888"
+        let file = directory.appendingPathComponent("2026-01-01T00-00-00-000Z_\(sessionID).jsonl")
+
+        var observed: [PiAgentState] = []
+        let watcher = PiSessionWatcher(
+            workingDirectory: cwd,
+            sessionID: sessionID,
+            sessionsRoot: root,
+            pollInterval: 0.05
+        ) { state in
+            observed.append(state)
+        }
+        checker.equal(watcher.state, .ready, "a node with no transcript yet reads as ready")
+        checker.equal(PiAgentState.ready.statusKind, .idle, "ready is not an alarm")
+        checker.equal(PiAgentState.waitingForYou.statusKind, .needsAttention, "needs-you is highlighted")
+        checker.equal(PiAgentState.waitingForYou.displayText, "needs you", "needs-you reads well")
+        watcher.start()
+
+        func append(_ line: String) {
+            // FileHandle(forWritingTo:) does not create the file, and pi creates
+            // its transcript lazily too.
+            if !FileManager.default.fileExists(atPath: file.path) {
+                FileManager.default.createFile(atPath: file.path, contents: nil)
+            }
+            guard let handle = try? FileHandle(forWritingTo: file) else { return }
+            _ = try? handle.seekToEnd()
+            try? handle.write(contentsOf: Data((line + "\n").utf8))
+            try? handle.close()
+        }
+        func timestamp(_ offset: Int) -> String {
+            "2026-01-01T00:00:\(String(format: "%02d", offset)).000Z"
+        }
+
+        append("{\"type\":\"session\",\"version\":3,\"id\":\"\(sessionID)\",\"timestamp\":\"\(timestamp(0))\",\"cwd\":\"\(cwd)\"}")
+        checker.check(
+            waitUntil(timeout: 3) { watcher.state == .ready },
+            "a transcript with only a header still reads as ready"
+        )
+
+        // A user prompt starts a run.
+        append("{\"type\":\"message\",\"id\":\"a1\",\"parentId\":null,\"timestamp\":\"\(timestamp(1))\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"do the thing\"}]}}")
+        checker.check(
+            waitUntil(timeout: 3) { watcher.state == .working("thinking") },
+            "a user message means the agent is working"
+        )
+
+        // The model calls a tool.
+        append("{\"type\":\"message\",\"id\":\"a2\",\"parentId\":\"a1\",\"timestamp\":\"\(timestamp(2))\",\"message\":{\"role\":\"assistant\",\"stopReason\":\"toolUse\",\"content\":[{\"type\":\"text\",\"text\":\"running\"},{\"type\":\"toolCall\",\"name\":\"bash\",\"arguments\":{}}]}}")
+        checker.check(
+            waitUntil(timeout: 3) { watcher.state == .working("bash") },
+            "a pending tool call names the tool (got \(watcher.state.displayText))"
+        )
+
+        // The tool returns; the model is still going.
+        append("{\"type\":\"message\",\"id\":\"a3\",\"parentId\":\"a2\",\"timestamp\":\"\(timestamp(3))\",\"message\":{\"role\":\"toolResult\",\"toolName\":\"bash\",\"isError\":false,\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]}}")
+        checker.check(
+            waitUntil(timeout: 3) { watcher.state == .working("bash") },
+            "a tool result keeps the agent working"
+        )
+
+        // The run finishes: this is the state worth surfacing.
+        append("{\"type\":\"message\",\"id\":\"a4\",\"parentId\":\"a3\",\"timestamp\":\"\(timestamp(4))\",\"message\":{\"role\":\"assistant\",\"stopReason\":\"stop\",\"content\":[{\"type\":\"text\",\"text\":\"done\"}]}}")
+        checker.check(
+            waitUntil(timeout: 3) { watcher.state == .waitingForYou },
+            "a finished run means the agent needs you"
+        )
+        checker.check(observed.contains(.waitingForYou), "the change was reported to the canvas")
+
+        // A new prompt starts the cycle again.
+        append("{\"type\":\"message\",\"id\":\"a5\",\"parentId\":\"a4\",\"timestamp\":\"\(timestamp(5))\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"again\"}]}}")
+        checker.check(
+            waitUntil(timeout: 3) { watcher.state == .working("thinking") },
+            "a follow-up prompt goes back to working"
+        )
+
+        watcher.stop()
+        try? FileManager.default.removeItem(at: root)
+    }
 
     /// End-to-end: spawn a real shell in a real PTY, type a command into it, and
     /// read the resulting output back out of the terminal buffer.

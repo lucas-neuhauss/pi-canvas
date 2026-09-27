@@ -85,6 +85,13 @@ enum ProcessResolver {
                 arguments: ["-l"]
             )
         case .pi:
+            // Bind the node to its own pi session up front. `--session-id`
+            // resumes exactly that conversation on relaunch (and creates it the
+            // first time), so restarting PiCanvas does not throw away the
+            // agents' context, and two agents in one directory stay separate.
+            let sessionID = UUID().uuidString.lowercased()
+            let name = sessionName(workingDirectory: directory, sessionID: sessionID)
+            let command = "exec pi --session-id \(shellQuoted(sessionID)) --name \(shellQuoted(name))"
             return NodeSpec(
                 kind: .pi,
                 worldFrame: worldFrame,
@@ -93,9 +100,28 @@ enum ProcessResolver {
                 // the shell so the node's process *is* pi, which keeps exit
                 // reporting honest and leaves no stray prompt behind.
                 executable: "/bin/zsh",
-                arguments: ["-lc", "exec pi"]
+                arguments: ["-lc", command],
+                sessionID: sessionID
             )
         }
+    }
+
+    /// A recognisable session name so `pi -r` lists canvas nodes meaningfully.
+    static func sessionName(workingDirectory: String, sessionID: String) -> String {
+        let base = (workingDirectory as NSString).lastPathComponent
+        let sanitized = base.replacingOccurrences(
+            of: "[^A-Za-z0-9._-]",
+            with: "-",
+            options: .regularExpression
+        )
+        let trimmed = String(sanitized.prefix(24)).trimmingCharacters(in: CharacterSet(charactersIn: ".-"))
+        let suffix = String(sessionID.prefix(8))
+        return trimmed.isEmpty ? "canvas-\(suffix)" : "canvas-\(trimmed)-\(suffix)"
+    }
+
+    /// Single-quote a value for safe interpolation into a shell command line.
+    private static func shellQuoted(_ value: String) -> String {
+        "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 
     static func request(for spec: NodeSpec) -> ProcessRequest {

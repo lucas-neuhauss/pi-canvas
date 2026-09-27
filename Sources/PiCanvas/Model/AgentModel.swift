@@ -39,6 +39,10 @@ struct NodeSpec: Codable, Identifiable, Equatable {
     /// Last title the terminal reported, restored so the canvas looks the same
     /// before the new process has had a chance to set one.
     var title: String?
+    /// For `pi` nodes: the pi session this node owns. Passing it back to
+    /// `pi --session-id` on relaunch resumes the same conversation, and keeping
+    /// it per node means two agents in one directory never share a session.
+    var sessionID: String?
 
     init(
         id: UUID = UUID(),
@@ -47,7 +51,8 @@ struct NodeSpec: Codable, Identifiable, Equatable {
         workingDirectory: String,
         executable: String,
         arguments: [String],
-        title: String? = nil
+        title: String? = nil,
+        sessionID: String? = nil
     ) {
         self.id = id
         self.kind = kind
@@ -59,6 +64,7 @@ struct NodeSpec: Codable, Identifiable, Equatable {
         self.executable = executable
         self.arguments = arguments
         self.title = title
+        self.sessionID = sessionID
     }
 
     var worldFrame: CGRect {
