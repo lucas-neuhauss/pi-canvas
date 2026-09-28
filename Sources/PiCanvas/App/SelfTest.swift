@@ -144,6 +144,7 @@ enum SelfTest {
         testImageNodes(checker: checker)
         testTextNodes(checker: checker)
         testContextMenu(checker: checker)
+        testNoteNodes(checker: checker)
         testPiSessionBinding(checker: checker)
         testAgentStatusWatcher(checker: checker)
         testGhosttyConfig(checker: checker)
@@ -372,7 +373,8 @@ enum SelfTest {
             canvas: canvas,
             workspaceStore: store,
             scrollbackStore: stores.scrollback,
-            assetStore: stores.assets
+            assetStore: stores.assets,
+            noteStore: stores.notes
         )
         controller.contentFactory = { _, _ in RecordingContent() }
 
@@ -417,7 +419,8 @@ enum SelfTest {
             canvas: canvas2,
             workspaceStore: store,
             scrollbackStore: stores.scrollback,
-            assetStore: stores.assets
+            assetStore: stores.assets,
+            noteStore: stores.notes
         )
         controller2.contentFactory = { _, _ in RecordingContent() }
         controller2.restore()
@@ -542,11 +545,17 @@ enum SelfTest {
         let directory = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("picanvas-images-\(UUID().uuidString)")
         let assetStore = AssetStore(directory: directory.appendingPathComponent("assets"))
+        let noteStore = NoteStore(directory: directory.appendingPathComponent("notes"))
         let workspaceStore = WorkspaceStore(
             directory: directory.appendingPathComponent("workspaces"),
             legacyLayoutURL: directory.appendingPathComponent("layout.json")
         )
-        let controller = CanvasController(canvas: canvas, workspaceStore: workspaceStore, assetStore: assetStore)
+        let controller = CanvasController(
+            canvas: canvas,
+            workspaceStore: workspaceStore,
+            assetStore: assetStore,
+            noteStore: noteStore
+        )
         let recorder = ContentRecorder()
         controller.contentFactory = { spec, _ in recorder.make(spec) }
         canvas.setViewport(zoom: 1, pan: .zero, notify: false)
@@ -609,7 +618,10 @@ enum SelfTest {
         // And the real factory really draws it from the copy: render the content
         // view and look for the image's colour at the centre.
         if let spec = controller.specs[imageNode.nodeID] {
-            let realContent = NodeContentFactory.make(spec: spec, assetStore: assetStore)
+            let realContent = NodeContentFactory.make(
+                spec: spec,
+                stores: NodeStores(assets: assetStore, notes: noteStore)
+            )
             checker.check(realContent is ImageContent, "the real factory builds image content for an image spec")
             let imageView = realContent.view
             imageView.frame = CGRect(x: 0, y: 0, width: 320, height: 160)
@@ -696,7 +708,8 @@ enum SelfTest {
             canvas: canvas2,
             workspaceStore: workspaceStore,
             scrollbackStore: ScrollbackStore(directory: directory.appendingPathComponent("scrollback")),
-            assetStore: assetStore
+            assetStore: assetStore,
+            noteStore: noteStore
         )
         let recorder2 = ContentRecorder()
         controller2.contentFactory = { spec, _ in recorder2.make(spec) }
@@ -736,11 +749,12 @@ enum SelfTest {
             canvas: canvas,
             workspaceStore: store,
             scrollbackStore: stores.scrollback,
-            assetStore: stores.assets
+            assetStore: stores.assets,
+            noteStore: stores.notes
         )
         var contents: [UUID: NodeContent] = [:]
-        controller.contentFactory = { spec, assetStore in
-            let content = NodeContentFactory.make(spec: spec, assetStore: assetStore)
+        controller.contentFactory = { spec, stores in
+            let content = NodeContentFactory.make(spec: spec, stores: stores)
             contents[spec.id] = content
             return content
         }
@@ -867,11 +881,12 @@ enum SelfTest {
             canvas: canvas2,
             workspaceStore: store,
             scrollbackStore: stores.scrollback,
-            assetStore: stores.assets
+            assetStore: stores.assets,
+            noteStore: stores.notes
         )
         var restored: [UUID: NodeContent] = [:]
-        controller2.contentFactory = { spec, assetStore in
-            let content = NodeContentFactory.make(spec: spec, assetStore: assetStore)
+        controller2.contentFactory = { spec, stores in
+            let content = NodeContentFactory.make(spec: spec, stores: stores)
             restored[spec.id] = content
             return content
         }
@@ -910,7 +925,8 @@ enum SelfTest {
                 legacyLayoutURL: directory.appendingPathComponent("layout.json")
             ),
             scrollbackStore: stores.scrollback,
-            assetStore: stores.assets
+            assetStore: stores.assets,
+            noteStore: stores.notes
         )
         let recorder = ContentRecorder()
         controller.contentFactory = { spec, _ in recorder.make(spec) }
@@ -925,7 +941,7 @@ enum SelfTest {
         }
         checker.equal(
             menu.items.filter { !$0.isSeparatorItem }.map(\.title),
-            ["New Terminal", "New pi Agent", "New Text Label", "Add Image…"],
+            ["New Terminal", "New pi Agent", "New Text Label", "New Note", "Add Image…"],
             "the context menu lists every way to make a node"
         )
 
@@ -962,6 +978,26 @@ enum SelfTest {
             checker.check(false, "the terminal item made a node")
         }
 
+        // "New Note" writes its markdown file through the store.
+        let notePoint = CGPoint(x: 800, y: 600)
+        if let thirdClick = mouseEvent(.rightMouseDown, at: notePoint, in: canvas),
+           let thirdMenu = canvas.menu(for: thirdClick),
+           let index = thirdMenu.items.firstIndex(where: { $0.title == "New Note" }) {
+            thirdMenu.performActionForItem(at: index)
+            if let noteNode = canvas.nodeViews.last,
+               let noteID = controller.specs[noteNode.nodeID]?.noteID {
+                checker.equal(controller.specs[noteNode.nodeID]?.kind, .note, "the note item makes a note")
+                checker.check(
+                    FileManager.default.fileExists(atPath: stores.notes.url(for: noteID).path),
+                    "the note item writes its markdown file"
+                )
+            } else {
+                checker.check(false, "the note item made a note")
+            }
+        } else {
+            checker.check(false, "the context menu offers New Note")
+        }
+
         // Right-clicking a node is the node's business, not the canvas's.
         if let node = canvas.nodeViews.last,
            let onNode = mouseEvent(.rightMouseDown, at: CGPoint(x: node.frame.midX, y: node.frame.midY), in: canvas) {
@@ -972,13 +1008,154 @@ enum SelfTest {
         try? FileManager.default.removeItem(at: directory)
     }
 
+    /// The note journey: create, type, autosave, render the preview, restart,
+    /// and keep two workspaces' notes apart.
+    private static func testNoteNodes(checker: Checker) {
+        print("\nnote nodes")
+
+        let canvasFrame = CGRect(x: 0, y: 0, width: 1200, height: 800)
+        let canvas = CanvasView(frame: canvasFrame)
+        let window = NSWindow(contentRect: canvasFrame, styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentView = canvas
+        window.makeKeyAndOrderFront(nil)
+
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("picanvas-notes-\(UUID().uuidString)")
+        let stores = tempStores(in: directory)
+        let workspaceStore = WorkspaceStore(
+            directory: directory.appendingPathComponent("workspaces"),
+            legacyLayoutURL: directory.appendingPathComponent("layout.json")
+        )
+        let controller = CanvasController(
+            canvas: canvas,
+            workspaceStore: workspaceStore,
+            scrollbackStore: stores.scrollback,
+            assetStore: stores.assets,
+            noteStore: stores.notes
+        )
+        var contents: [UUID: NodeContent] = [:]
+        controller.contentFactory = { spec, stores in
+            let content = NodeContentFactory.make(spec: spec, stores: stores)
+            contents[spec.id] = content
+            return content
+        }
+        canvas.setViewport(zoom: 1, pan: .zero, notify: false)
+
+        // Creating one writes its markdown file straight away.
+        let firstWorkspace = controller.activeWorkspaceID
+        let first = controller.createNoteNode(text: "# Plan\n\nBuild the thing.\n")
+        guard let firstSpec = controller.specs[first],
+              let firstID = firstSpec.noteID,
+              let note = contents[first] as? NoteContent else {
+            checker.check(false, "a note node was created")
+            window.close()
+            return
+        }
+        checker.equal(firstSpec.kind, .note, "the node is a note")
+        let firstURL = stores.notes.url(for: firstID)
+        checker.equal(firstURL.lastPathComponent, "\(firstID.uuidString).md", "the note file is named after its id")
+        checker.equal(stores.notes.load(firstID), "# Plan\n\nBuild the thing.\n", "the initial text is on disk")
+
+        // Typing autosaves, and the first heading titles the node.
+        let body = """
+        # Plan
+
+        - wire the preview
+        - save as you type
+
+        See [the docs](https://example.com/docs).
+        """
+        note.text = body
+        note.flush()
+        checker.equal(stores.notes.load(firstID), body, "typing is saved to the markdown file")
+        checker.equal(canvas.nodeView(withID: first)?.title, "Plan", "the first heading titles the node")
+
+        // Preview renders headings, lists and links.
+        note.setPreviewing(true)
+        checker.check(note.isPreviewing, "the note switches to preview")
+        checker.check(!note.editorIsFirstResponder, "the hidden editor does not keep the keyboard")
+        checker.equal(note.text, body, "previewing does not touch the source")
+        let rendered = note.renderedPreview
+        let renderedText = rendered.string
+        if let heading = renderedText.range(of: "Plan") {
+            let index = renderedText.distance(from: renderedText.startIndex, to: heading.lowerBound)
+            let headingFont = rendered.attribute(.font, at: index, effectiveRange: nil) as? NSFont
+            checker.check((headingFont?.pointSize ?? 0) > 16, "the heading renders larger than body text")
+        } else {
+            checker.check(false, "the preview shows the heading")
+        }
+        checker.check(renderedText.contains("\u{2022}"), "the preview shows list bullets")
+        if let link = renderedText.range(of: "the docs") {
+            let index = renderedText.distance(from: renderedText.startIndex, to: link.lowerBound)
+            let url = rendered.attribute(.link, at: index, effectiveRange: nil) as? URL
+            checker.equal(url, URL(string: "https://example.com/docs"), "the link is a real link")
+        } else {
+            checker.check(false, "the preview shows the link")
+        }
+        note.setPreviewing(false)
+        checker.equal(note.text, body, "the source is unchanged after previewing")
+
+        // A second workspace holds its own note, and switching leaves the first
+        // one alone.
+        let secondWorkspace = controller.createWorkspace(named: "Second")
+        let second = controller.createNoteNode(text: "Second note")
+        guard let secondID = controller.specs[second]?.noteID,
+              let secondNote = contents[second] as? NoteContent else {
+            checker.check(false, "a note in the second workspace")
+            window.close()
+            return
+        }
+        secondNote.text = "Second note body"
+        secondNote.flush()
+        checker.check(firstID != secondID, "each note gets its own file")
+        checker.equal(controller.specs[first]?.workspaceID, firstWorkspace, "the first note belongs to the first workspace")
+        checker.equal(controller.specs[second]?.workspaceID, secondWorkspace, "the second note to the second")
+        controller.activateWorkspace(id: firstWorkspace)
+        checker.equal((contents[first] as? NoteContent)?.text, body, "the first note is untouched by the second workspace")
+        checker.equal(stores.notes.load(firstID), body, "and its file is too")
+        checker.equal(stores.notes.load(secondID), "Second note body", "the second note kept its own text")
+
+        // Restart: the note comes back with its text, in its workspace.
+        controller.saveNow()
+        let canvas2 = CanvasView(frame: canvasFrame)
+        let window2 = NSWindow(contentRect: canvasFrame, styleMask: [.titled], backing: .buffered, defer: false)
+        window2.contentView = canvas2
+        window2.makeKeyAndOrderFront(nil)
+        let controller2 = CanvasController(
+            canvas: canvas2,
+            workspaceStore: workspaceStore,
+            scrollbackStore: stores.scrollback,
+            assetStore: stores.assets,
+            noteStore: stores.notes
+        )
+        var restored: [UUID: NodeContent] = [:]
+        controller2.contentFactory = { spec, stores in
+            let content = NodeContentFactory.make(spec: spec, stores: stores)
+            restored[spec.id] = content
+            return content
+        }
+        controller2.restore()
+        checker.equal(controller2.activeWorkspaceID, firstWorkspace, "the most recently used workspace opens first")
+        checker.equal((restored[first] as? NoteContent)?.text, body, "the note comes back with its text")
+        checker.equal(controller2.specs[first]?.noteID, firstID, "and its file id")
+
+        // Closing the node takes its file with it.
+        controller2.close(nodeID: first)
+        checker.check(!FileManager.default.fileExists(atPath: firstURL.path), "closing the note removes its file")
+
+        window2.close()
+        window.close()
+        try? FileManager.default.removeItem(at: directory)
+    }
+
     /// Temp stores for a controller that will call `restore()`. Restoring
     /// prunes both stores, and a test must never prune the developer's real
     /// `~/Library/Application Support/PiCanvas`.
-    private static func tempStores(in directory: URL) -> (scrollback: ScrollbackStore, assets: AssetStore) {
+    private static func tempStores(in directory: URL) -> (scrollback: ScrollbackStore, assets: AssetStore, notes: NoteStore) {
         (
             ScrollbackStore(directory: directory.appendingPathComponent("scrollback")),
-            AssetStore(directory: directory.appendingPathComponent("assets"))
+            AssetStore(directory: directory.appendingPathComponent("assets")),
+            NoteStore(directory: directory.appendingPathComponent("notes"))
         )
     }
 
@@ -1673,7 +1850,8 @@ enum SelfTest {
             canvas: canvas,
             workspaceStore: store,
             scrollbackStore: stores.scrollback,
-            assetStore: stores.assets
+            assetStore: stores.assets,
+            noteStore: stores.notes
         )
         controller.contentFactory = { spec, _ in recorder.make(spec) }
         controller.restore()
@@ -1756,7 +1934,8 @@ enum SelfTest {
             canvas: canvas2,
             workspaceStore: store,
             scrollbackStore: stores.scrollback,
-            assetStore: stores.assets
+            assetStore: stores.assets,
+            noteStore: stores.notes
         )
         controller2.contentFactory = { spec, _ in recorder2.make(spec) }
         controller2.restore()
@@ -2039,7 +2218,8 @@ enum SelfTest {
             canvas: canvas,
             workspaceStore: WorkspaceStore(directory: controllerDirectory, legacyLayoutURL: layoutURL),
             scrollbackStore: stores.scrollback,
-            assetStore: stores.assets
+            assetStore: stores.assets,
+            noteStore: stores.notes
         )
         controller.sessionsRoot = root
         controller.contentFactory = { _, _ in RecordingContent() }
@@ -2328,7 +2508,10 @@ enum SelfTest {
             workingDirectory: NSTemporaryDirectory(),
             worldFrame: CGRect(x: 0, y: 0, width: 800, height: 500)
         )
-        guard let content = NodeContentFactory.make(spec: spec, assetStore: AssetStore()) as? ProcessContent else {
+        guard let content = NodeContentFactory.make(
+            spec: spec,
+            stores: NodeStores(assets: AssetStore(), notes: NoteStore())
+        ) as? ProcessContent else {
             fatalError("the terminal backend must produce process-backed content")
         }
         return content
