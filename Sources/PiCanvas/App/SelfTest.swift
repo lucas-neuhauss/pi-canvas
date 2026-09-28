@@ -143,6 +143,7 @@ enum SelfTest {
         testAssetStore(checker: checker)
         testImageNodes(checker: checker)
         testTextNodes(checker: checker)
+        testContextMenu(checker: checker)
         testPiSessionBinding(checker: checker)
         testAgentStatusWatcher(checker: checker)
         testGhosttyConfig(checker: checker)
@@ -884,6 +885,89 @@ enum SelfTest {
         checker.close(restoredNode?.worldFrame.width ?? 0, node.worldFrame.width, 1, "and at the same size")
 
         window2.close()
+        window.close()
+        try? FileManager.default.removeItem(at: directory)
+    }
+
+    /// The right-click creation menu: a discoverable home for every kind of
+    /// node that exists today.
+    private static func testContextMenu(checker: Checker) {
+        print("\ncontext menu")
+
+        let canvasFrame = CGRect(x: 0, y: 0, width: 1000, height: 700)
+        let canvas = CanvasView(frame: canvasFrame)
+        let window = NSWindow(contentRect: canvasFrame, styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentView = canvas
+        window.makeKeyAndOrderFront(nil)
+
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("picanvas-menu-\(UUID().uuidString)")
+        let stores = tempStores(in: directory)
+        let controller = CanvasController(
+            canvas: canvas,
+            workspaceStore: WorkspaceStore(
+                directory: directory.appendingPathComponent("workspaces"),
+                legacyLayoutURL: directory.appendingPathComponent("layout.json")
+            ),
+            scrollbackStore: stores.scrollback,
+            assetStore: stores.assets
+        )
+        let recorder = ContentRecorder()
+        controller.contentFactory = { spec, _ in recorder.make(spec) }
+        canvas.setViewport(zoom: 1, pan: .zero, notify: false)
+
+        let emptyPoint = CGPoint(x: 500, y: 350)
+        guard let rightClick = mouseEvent(.rightMouseDown, at: emptyPoint, in: canvas),
+              let menu = canvas.menu(for: rightClick) else {
+            checker.check(false, "empty canvas has a creation menu")
+            window.close()
+            return
+        }
+        checker.equal(
+            menu.items.filter { !$0.isSeparatorItem }.map(\.title),
+            ["New Terminal", "New pi Agent", "New Text Label", "Add Image…"],
+            "the context menu lists every way to make a node"
+        )
+
+        // "New Text Label" makes one where the click was, and starts editing.
+        if let index = menu.items.firstIndex(where: { $0.title == "New Text Label" }) {
+            menu.performActionForItem(at: index)
+        }
+        guard let labelNode = canvas.nodeViews.last,
+              controller.specs[labelNode.nodeID]?.kind == .text else {
+            checker.check(false, "the label item made a text node")
+            window.close()
+            return
+        }
+        checker.check(true, "the label item made a text node")
+        checker.close(labelNode.worldFrame.midX, emptyPoint.x, 1, "the label lands where the click was (x)")
+        checker.close(labelNode.worldFrame.midY, emptyPoint.y, 1, "the label lands where the click was (y)")
+
+        // "New Terminal" from the same menu creates a terminal at its own point.
+        controller.close(nodeID: labelNode.nodeID, persisting: false)
+        let terminalPoint = CGPoint(x: 200, y: 200)
+        guard let secondClick = mouseEvent(.rightMouseDown, at: terminalPoint, in: canvas),
+              let secondMenu = canvas.menu(for: secondClick) else {
+            checker.check(false, "a second context menu opens")
+            window.close()
+            return
+        }
+        if let index = secondMenu.items.firstIndex(where: { $0.title == "New Terminal" }) {
+            secondMenu.performActionForItem(at: index)
+        }
+        if let terminalNode = canvas.nodeViews.last {
+            checker.equal(controller.specs[terminalNode.nodeID]?.kind, .shell, "the terminal item makes a terminal")
+            checker.close(terminalNode.worldFrame.midX, terminalPoint.x, 1, "the terminal lands where the click was")
+        } else {
+            checker.check(false, "the terminal item made a node")
+        }
+
+        // Right-clicking a node is the node's business, not the canvas's.
+        if let node = canvas.nodeViews.last,
+           let onNode = mouseEvent(.rightMouseDown, at: CGPoint(x: node.frame.midX, y: node.frame.midY), in: canvas) {
+            checker.check(canvas.menu(for: onNode) == nil, "a node's right-click is left to the node")
+        }
+
         window.close()
         try? FileManager.default.removeItem(at: directory)
     }

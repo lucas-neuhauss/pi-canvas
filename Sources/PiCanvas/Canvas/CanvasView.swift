@@ -25,6 +25,10 @@ protocol CanvasViewDelegate: AnyObject {
     func canvasView(_ canvas: CanvasView, didReceiveImageDropOf url: URL, atWorldPoint point: CGPoint) -> Bool
     /// A double-click landed on empty canvas: make a text label there.
     func canvasView(_ canvas: CanvasView, didRequestTextNodeAt point: CGPoint)
+    /// A context-menu request to create a node at a world point.
+    func canvasView(_ canvas: CanvasView, didRequestNewNodeOfKind kind: NodeKind, at point: CGPoint)
+    /// A context-menu request to pick an image file to place at a world point.
+    func canvasView(_ canvas: CanvasView, didRequestImagePickerAt point: CGPoint)
     /// A node was dropped onto another node. Returns true when the drop was used.
     func canvasView(_ canvas: CanvasView, nodeID: UUID, didReceiveDropFrom sourceNodeID: UUID) -> Bool
 }
@@ -305,6 +309,50 @@ final class CanvasView: NSView {
     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
         let point = convert(sender.draggingLocation, from: nil)
         return handleImageDrop(pasteboard: sender.draggingPasteboard, canvasPoint: point)
+    }
+
+    // MARK: - Context menu
+
+    /// The world point the context menu was opened at, so creation items land
+    /// where the user right-clicked.
+    private var contextMenuWorldPoint: CGPoint = .zero
+
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let point = convert(event.locationInWindow, from: nil)
+        // A node owns its right-clicks (terminals bring their own menus); the
+        // creation menu belongs to the empty canvas.
+        guard node(at: point) == nil else { return nil }
+        contextMenuWorldPoint = worldPoint(fromScreen: point)
+
+        let menu = NSMenu()
+        menu.addItem(contextItem("New Terminal", #selector(contextNewTerminal(_:))))
+        menu.addItem(contextItem("New pi Agent", #selector(contextNewPi(_:))))
+        menu.addItem(.separator())
+        menu.addItem(contextItem("New Text Label", #selector(contextNewTextLabel(_:))))
+        menu.addItem(contextItem("Add Image…", #selector(contextAddImage(_:))))
+        return menu
+    }
+
+    private func contextItem(_ title: String, _ action: Selector) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+        item.target = self
+        return item
+    }
+
+    @objc private func contextNewTerminal(_ sender: Any?) {
+        canvasDelegate?.canvasView(self, didRequestNewNodeOfKind: .shell, at: contextMenuWorldPoint)
+    }
+
+    @objc private func contextNewPi(_ sender: Any?) {
+        canvasDelegate?.canvasView(self, didRequestNewNodeOfKind: .pi, at: contextMenuWorldPoint)
+    }
+
+    @objc private func contextNewTextLabel(_ sender: Any?) {
+        canvasDelegate?.canvasView(self, didRequestNewNodeOfKind: .text, at: contextMenuWorldPoint)
+    }
+
+    @objc private func contextAddImage(_ sender: Any?) {
+        canvasDelegate?.canvasView(self, didRequestImagePickerAt: contextMenuWorldPoint)
     }
 
     /// Recomputes every node's screen frame. Called after any zoom/pan/frame change.

@@ -1,4 +1,5 @@
 import AppKit
+import UniformTypeIdentifiers
 
 /// Owns the node lifecycle: creating, restoring, closing and persisting nodes,
 /// and keeping the canvas view in sync with the persisted model.
@@ -442,9 +443,9 @@ final class CanvasController: NSObject {
 
     // MARK: - Nodes
 
-    func newNode(kind: NodeKind, workingDirectory: String? = nil) {
+    func newNode(kind: NodeKind, workingDirectory: String? = nil, at worldPoint: CGPoint? = nil) {
         let directory = workingDirectory ?? defaultWorkingDirectory
-        let centre = canvas.viewportCentreWorldPoint()
+        let centre = worldPoint ?? canvas.viewportCentreWorldPoint()
         let size = CanvasController.defaultNodeSize
         cascadeIndex += 1
         let desired = CGPoint(
@@ -497,6 +498,21 @@ final class CanvasController: NSObject {
         add(spec: spec, start: true, select: true)
         reveal(spec.worldFrame)
         return spec.id
+    }
+
+    /// The file-picker route to an image node, for people who would rather not
+    /// drag from Finder. Same code path as a drop, including dedup and sizing.
+    func chooseImage(at worldPoint: CGPoint? = nil) {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [.image]
+        panel.prompt = "Add Image"
+        panel.message = "The image is copied onto the canvas."
+        if panel.runModal() == .OK, let url = panel.url {
+            createImageNode(contentsOf: url, at: worldPoint)
+        }
     }
 
     /// The size a dropped image gets: its own aspect ratio, capped so a 6K
@@ -1034,6 +1050,22 @@ extension CanvasController: CanvasViewDelegate {
 
     func canvasView(_ canvas: CanvasView, didRequestTextNodeAt point: CGPoint) {
         createTextNode(at: point)
+    }
+
+    func canvasView(_ canvas: CanvasView, didRequestNewNodeOfKind kind: NodeKind, at point: CGPoint) {
+        switch kind {
+        case .text:
+            createTextNode(at: point)
+        case .shell, .pi:
+            newNode(kind: kind, at: point)
+        case .image, .note, .browser:
+            // Image files come through the picker; the rest do not exist yet.
+            break
+        }
+    }
+
+    func canvasView(_ canvas: CanvasView, didRequestImagePickerAt point: CGPoint) {
+        chooseImage(at: point)
     }
 
     func canvasView(_ canvas: CanvasView, nodeID: UUID, didReceiveDropFrom sourceNodeID: UUID) -> Bool {
