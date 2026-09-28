@@ -12,7 +12,7 @@ waiting on.
 | `NodeContent`/`ProcessContent` seam + backend-agnostic tests | done |
 | libghostty host (`GhosttyApp`, `GhosttySurfaceView`, `GhosttySurfaceContent`) | written, typechecks with 0 errors against the real header |
 | Build auto-detection (Ghostty when present, SwiftTerm otherwise) | done |
-| Self-test suite (296 checks) | passing on both backends |
+| Self-test suite (323 checks) | passing on both backends |
 | **Building libghostty on this machine** | **blocked: needs Xcode** |
 
 The app currently runs on the **SwiftTerm** backend because libghostty could not

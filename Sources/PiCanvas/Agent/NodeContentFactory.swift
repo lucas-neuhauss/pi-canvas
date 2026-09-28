@@ -26,7 +26,10 @@ enum NodeContentFactory {
             }
             return ImageContent(nodeID: spec.id, assetURL: assetStore.url(for: asset))
 
-        case .text, .note, .browser:
+        case .text:
+            return TextContent(text: spec.text ?? "")
+
+        case .note, .browser:
             // The seam is ready for these; the content is not built yet.
             return MissingNodeContent(message: "\(spec.kind.displayName) nodes are not implemented yet")
         }

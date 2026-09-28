@@ -34,6 +34,10 @@ enum NodeMetrics {
     static let topResizeThickness: CGFloat = 6
     static let minWorldWidth: CGFloat = 240
     static let minWorldHeight: CGFloat = 150
+    /// Labels are signposts, not content panes: a single short line is a
+    /// perfectly good node, so they get much smaller minimums.
+    static let minTextWorldWidth: CGFloat = 80
+    static let minTextWorldHeight: CGFloat = 36
     static let contentCornerRadius: CGFloat = 4
 }
 
@@ -223,6 +227,17 @@ final class NodeFrameView: NSView {
 
     var contentRect: CGRect {
         let chrome = chrome
+        if kind == .text {
+            // No title bar to make room for: the text fills the box, leaving
+            // only the resize gutter.
+            let pad = max(chrome.padding / 2, 3)
+            return CGRect(
+                x: pad,
+                y: pad,
+                width: max(bounds.width - pad * 2, 1),
+                height: max(bounds.height - pad * 2, 1)
+            ).integral
+        }
         let top = chrome.titleBarHeight + 2
         let pad = chrome.padding
         let rect = CGRect(
@@ -247,10 +262,13 @@ final class NodeFrameView: NSView {
 
     /// Which borders the point is close enough to drag. Being within the band of
     /// two perpendicular borders makes it a corner, which needs no special case.
-    /// The top band is thinner so the title bar stays grabbable for moving.
+    /// The top band is thinner so a terminal's title bar stays grabbable; a
+    /// label has no title bar, so all four bands are equally thick.
     func resizeEdge(at point: CGPoint) -> ResizeEdge? {
         let edgeThickness = max(NodeMetrics.resizeThickness * chromeScale, 6)
-        let topThickness = max(NodeMetrics.topResizeThickness * chromeScale, 4)
+        let topThickness = kind == .text
+            ? edgeThickness
+            : max(NodeMetrics.topResizeThickness * chromeScale, 4)
 
         var edge: ResizeEdge = []
         if point.x <= edgeThickness { edge.insert(.left) }
@@ -280,11 +298,13 @@ final class NodeFrameView: NSView {
         super.resetCursorRects()
         let chrome = chrome
         let edgeThickness = max(NodeMetrics.resizeThickness * chromeScale, 6)
-        let topThickness = max(NodeMetrics.topResizeThickness * chromeScale, 4)
+        let isLabel = kind == .text
+        let topThickness = isLabel ? edgeThickness : max(NodeMetrics.topResizeThickness * chromeScale, 4)
 
-        // The close button gets a plain arrow, then the resize bands, then the
-        // title bar (minus the close button and the top band) moves the node.
-        addCursorRect(closeRect.insetBy(dx: -2, dy: -2), cursor: .arrow)
+        // The close button gets a plain arrow; a label has no close button.
+        if !isLabel {
+            addCursorRect(closeRect.insetBy(dx: -2, dy: -2), cursor: .arrow)
+        }
 
         // Every border and corner is draggable, with the matching native cursor.
         addCursorRect(CGRect(x: 0, y: topThickness, width: edgeThickness, height: max(bounds.height - topThickness - edgeThickness, 1)), cursor: NodeCursor.resize([.left]))
@@ -296,10 +316,23 @@ final class NodeFrameView: NSView {
         addCursorRect(CGRect(x: 0, y: bounds.height - edgeThickness, width: edgeThickness, height: edgeThickness), cursor: NodeCursor.resize([.left, .bottom]))
         addCursorRect(CGRect(x: bounds.width - edgeThickness, y: bounds.height - edgeThickness, width: edgeThickness, height: edgeThickness), cursor: NodeCursor.resize([.right, .bottom]))
 
-        addCursorRect(
-            CGRect(x: 0, y: topThickness, width: max(bounds.width - chrome.closeSize - chrome.padding * 2, 1), height: max(chrome.titleBarHeight - topThickness, 1)),
-            cursor: .openHand
-        )
+        if isLabel {
+            // The text is the grab area.
+            addCursorRect(
+                CGRect(
+                    x: edgeThickness,
+                    y: edgeThickness,
+                    width: max(bounds.width - edgeThickness * 2, 1),
+                    height: max(bounds.height - edgeThickness * 2, 1)
+                ),
+                cursor: .openHand
+            )
+        } else {
+            addCursorRect(
+                CGRect(x: 0, y: topThickness, width: max(bounds.width - chrome.closeSize - chrome.padding * 2, 1), height: max(chrome.titleBarHeight - topThickness, 1)),
+                cursor: .openHand
+            )
+        }
     }
 
     // MARK: - Canvas helpers
@@ -322,16 +355,27 @@ final class NodeFrameView: NSView {
         didDrag = false
         nodeDelegate?.nodeFrameViewDidBeginInteraction(self)
 
-        // The close button is small and specific, so it wins over the corner band.
-        if closeRect.contains(point) {
+        // The close button is small and specific, so it wins over the corner
+        // band. A label has no close button.
+        if kind != .text, closeRect.contains(point) {
             dragMode = .closeButton
+            return
+        }
+
+        // Double-clicking inline-editable content (a label) starts editing it.
+        // Terminals handle their own double-clicks and are not editable views,
+        // so they never get here.
+        if event.clickCount == 2, resizeEdge(at: point) == nil,
+           let editable = contentView as? InlineEditableView {
+            dragMode = .none
+            editable.beginInlineEditing()
             return
         }
 
         // Double-clicking the title bar renames it, the gesture Finder uses. This
         // is checked before anything needing canvas coordinates, so renaming does
         // not depend on world geometry.
-        if event.clickCount == 2, point.y <= chrome.titleBarHeight, resizeEdge(at: point) == nil {
+        if event.clickCount == 2, kind != .text, point.y <= chrome.titleBarHeight, resizeEdge(at: point) == nil {
             dragMode = .none
             beginRenaming()
             return
@@ -346,7 +390,9 @@ final class NodeFrameView: NSView {
 
         if let edge = resizeEdge(at: point) {
             dragMode = .resize(edge)
-        } else if point.y <= chrome.titleBarHeight {
+        } else if kind == .text || point.y <= chrome.titleBarHeight {
+            // A label moves from anywhere in its text; a terminal from its
+            // title bar.
             dragMode = .move
         } else {
             // Clicking the node's padding: select and hand focus to the terminal.
@@ -402,6 +448,13 @@ final class NodeFrameView: NSView {
         didDrag = false
     }
 
+    /// The box minimums: a label may be much smaller than a terminal.
+    private var minimumWorldSize: CGSize {
+        kind == .text
+            ? CGSize(width: NodeMetrics.minTextWorldWidth, height: NodeMetrics.minTextWorldHeight)
+            : CGSize(width: NodeMetrics.minWorldWidth, height: NodeMetrics.minWorldHeight)
+    }
+
     /// Applies a drag to the grabbed borders. The opposite borders stay put, so
     /// dragging the left edge moves the origin rather than the whole node.
     private func resized(_ start: CGRect, by delta: CGPoint, edges: ResizeEdge) -> CGRect {
@@ -410,8 +463,8 @@ final class NodeFrameView: NSView {
         }
 
         var frame = start
-        let minWidth = NodeMetrics.minWorldWidth
-        let minHeight = NodeMetrics.minWorldHeight
+        let minWidth = minimumWorldSize.width
+        let minHeight = minimumWorldSize.height
 
         if edges.contains(.right) {
             frame.size.width = max(start.width + delta.x, minWidth).rounded()
@@ -508,6 +561,8 @@ final class NodeFrameView: NSView {
     /// Edits the node's name in place. A real text field, so selection, the caret
     /// and input methods all behave.
     func beginRenaming() {
+        // A label is edited directly; it has no title to rename.
+        guard kind != .text else { return }
         guard titleField == nil else {
             window?.makeFirstResponder(titleField)
             return
@@ -607,12 +662,16 @@ final class NodeFrameView: NSView {
         borderColor.setStroke()
         borderPath.stroke()
 
-        // Separator under the title bar.
-        separatorColor.setFill()
-        NSRect(x: 1, y: chrome.titleBarHeight, width: bounds.width - 2, height: 1).fill()
+        // Separator under the title bar. A label has no title bar.
+        if kind != .text {
+            separatorColor.setFill()
+            NSRect(x: 1, y: chrome.titleBarHeight, width: bounds.width - 2, height: 1).fill()
+        }
         context.restoreGState()
 
-        drawTitleBar()
+        if kind != .text {
+            drawTitleBar()
+        }
     }
 
     private func drawTitleBar() {

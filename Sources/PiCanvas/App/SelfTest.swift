@@ -142,6 +142,7 @@ enum SelfTest {
         testNodeKinds(checker: checker)
         testAssetStore(checker: checker)
         testImageNodes(checker: checker)
+        testTextNodes(checker: checker)
         testPiSessionBinding(checker: checker)
         testAgentStatusWatcher(checker: checker)
         testGhosttyConfig(checker: checker)
@@ -706,6 +707,181 @@ enum SelfTest {
         // Closing the last reference removes the copy.
         controller2.close(nodeID: imageNode.nodeID)
         checker.check(!FileManager.default.fileExists(atPath: storedURL.path), "closing the node removes its unreferenced asset")
+
+        window2.close()
+        window.close()
+        try? FileManager.default.removeItem(at: directory)
+    }
+
+    /// The label journey: double-click to make, type, commit, move, resize,
+    /// restart, and stay out of the terminal switcher.
+    private static func testTextNodes(checker: Checker) {
+        print("\ntext labels")
+
+        let canvasFrame = CGRect(x: 0, y: 0, width: 1200, height: 800)
+        let canvas = CanvasView(frame: canvasFrame)
+        let window = NSWindow(contentRect: canvasFrame, styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentView = canvas
+        window.makeKeyAndOrderFront(nil)
+
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("picanvas-text-\(UUID().uuidString)")
+        let stores = tempStores(in: directory)
+        let store = WorkspaceStore(
+            directory: directory.appendingPathComponent("workspaces"),
+            legacyLayoutURL: directory.appendingPathComponent("layout.json")
+        )
+        let controller = CanvasController(
+            canvas: canvas,
+            workspaceStore: store,
+            scrollbackStore: stores.scrollback,
+            assetStore: stores.assets
+        )
+        var contents: [UUID: NodeContent] = [:]
+        controller.contentFactory = { spec, assetStore in
+            let content = NodeContentFactory.make(spec: spec, assetStore: assetStore)
+            contents[spec.id] = content
+            return content
+        }
+        canvas.setViewport(zoom: 1, pan: .zero, notify: false)
+
+        // Double-clicking empty canvas creates the label, already editing.
+        let point = CGPoint(x: 500, y: 400)
+        guard let doubleClick = mouseEvent(.leftMouseDown, at: point, in: canvas, clickCount: 2) else {
+            checker.check(false, "double-click event built")
+            window.close()
+            return
+        }
+        canvas.mouseDown(with: doubleClick)
+
+        guard let node = canvas.nodeViews.last,
+              let spec = controller.specs[node.nodeID],
+              let label = contents[node.nodeID] as? TextContent else {
+            checker.check(false, "double-clicking empty canvas makes a label")
+            window.close()
+            return
+        }
+        checker.equal(spec.kind, .text, "double-clicking empty canvas makes a text node")
+        checker.check(label.isEditing, "the new label is ready to type into")
+        checker.close(node.worldFrame.midX, point.x, 1, "the label is centred on the double-click (x)")
+        checker.close(node.worldFrame.midY, point.y, 1, "the label is centred on the double-click (y)")
+        checker.check(node.contentRect.minY < 10, "the label has no title bar")
+
+        // Typing, then Escape (the editor's cancel) commits and hands the text
+        // back to the controller.
+        label.text = "auth refactor\nflaky tests"
+        label.editor.cancelOperation(nil)
+        checker.check(!label.isEditing, "escape ends editing")
+        checker.equal(
+            controller.specs[node.nodeID]?.text,
+            "auth refactor\nflaky tests",
+            "the committed text lands on the spec"
+        )
+
+        // Signposts, not destinations: the terminal switcher skips labels.
+        checker.equal(controller.paletteEntries().count, 0, "a label stays out of the node switcher")
+
+        // While not editing, the whole box moves the node and the editor is inert.
+        checker.check(
+            node.contentView?.hitTest(CGPoint(x: 20, y: 20)) == nil,
+            "an idle label is transparent to the mouse"
+        )
+        let before = node.worldFrame
+        let grab = CGPoint(x: node.frame.midX, y: node.frame.midY)
+        drag(canvas: canvas, from: grab, to: CGPoint(x: grab.x + 90, y: grab.y + 40), on: node)
+        checker.close(node.worldFrame.origin.x, before.origin.x + 90, 1, "a label moves by dragging its text (x)")
+        checker.close(node.worldFrame.origin.y, before.origin.y + 40, 1, "a label moves by dragging its text (y)")
+        checker.close(node.worldFrame.width, before.width, 1, "moving does not resize it")
+
+        // Resizing is the same border drag as any node.
+        let grip = CGPoint(x: node.frame.maxX - 6, y: node.frame.maxY - 6)
+        drag(canvas: canvas, from: grip, to: CGPoint(x: grip.x + 60, y: grip.y + 30), on: node)
+        checker.close(node.worldFrame.width, before.width + 60, 1, "a label resizes like any node")
+        checker.close(node.worldFrame.height, before.height + 30, 1, "in both directions")
+
+        // Double-clicking the label itself starts editing again.
+        let editPoint = CGPoint(x: node.frame.midX, y: node.frame.midY)
+        if let editClick = mouseEvent(.leftMouseDown, at: editPoint, in: canvas, clickCount: 2) {
+            node.mouseDown(with: editClick)
+            checker.check(label.isEditing, "double-clicking a label starts editing")
+        } else {
+            checker.check(false, "edit double-click event built")
+        }
+        label.editor.cancelOperation(nil)
+        checker.check(!label.isEditing, "and escape commits again")
+
+        // So does a click away: the canvas takes first responder and the editor
+        // resigns.
+        label.beginEditing()
+        checker.check(label.isEditing, "editing again")
+        if let awayDown = mouseEvent(.leftMouseDown, at: CGPoint(x: 60, y: 60), in: canvas),
+           let awayUp = mouseEvent(.leftMouseUp, at: CGPoint(x: 60, y: 60), in: canvas) {
+            canvas.mouseDown(with: awayDown)
+            canvas.mouseUp(with: awayUp)
+            checker.check(!label.isEditing, "clicking empty canvas commits the edit")
+            checker.equal(
+                controller.specs[node.nodeID]?.text,
+                "auth refactor\nflaky tests",
+                "and stores the text"
+            )
+        } else {
+            checker.check(false, "click-away events built")
+        }
+
+        // And it draws: render the committed label and look for text pixels.
+        if let labelView = node.contentView,
+           let rep = labelView.bitmapImageRepForCachingDisplay(in: labelView.bounds) {
+            labelView.cacheDisplay(in: labelView.bounds, to: rep)
+            var textPixels = 0
+            for x in stride(from: 0, to: rep.pixelsWide, by: 2) {
+                for y in stride(from: 0, to: rep.pixelsHigh, by: 2) {
+                    if let colour = rep.colorAt(x: x, y: y)?.usingColorSpace(.sRGB),
+                       colour.redComponent > 0.5, colour.blueComponent > 0.5 {
+                        textPixels += 1
+                    }
+                }
+            }
+            checker.check(textPixels > 0, "the label draws its text")
+        } else {
+            checker.check(false, "the label can be rendered")
+        }
+
+        // Text scales with the canvas, exactly as terminal glyphs do.
+        let fontBefore = label.editor.font?.pointSize ?? 0
+        label.setContentScale(2)
+        checker.close(label.editor.font?.pointSize ?? 0, fontBefore * 2, 0.6, "canvas zoom scales the label text")
+        label.setContentScale(1)
+
+        // Persistence: kind, text and frame all come back.
+        controller.saveNow()
+        let persisted = store.loadAll().first?.layout.nodes.first { $0.id == node.nodeID }
+        checker.equal(persisted?.kind, .text, "the label persists")
+        checker.equal(persisted?.text, "auth refactor\nflaky tests", "its text persists")
+
+        let canvas2 = CanvasView(frame: canvasFrame)
+        let window2 = NSWindow(contentRect: canvasFrame, styleMask: [.titled], backing: .buffered, defer: false)
+        window2.contentView = canvas2
+        window2.makeKeyAndOrderFront(nil)
+        let controller2 = CanvasController(
+            canvas: canvas2,
+            workspaceStore: store,
+            scrollbackStore: stores.scrollback,
+            assetStore: stores.assets
+        )
+        var restored: [UUID: NodeContent] = [:]
+        controller2.contentFactory = { spec, assetStore in
+            let content = NodeContentFactory.make(spec: spec, assetStore: assetStore)
+            restored[spec.id] = content
+            return content
+        }
+        controller2.restore()
+
+        let restoredLabel = restored[node.nodeID] as? TextContent
+        let restoredNode = canvas2.nodeView(withID: node.nodeID)
+        checker.equal(restoredLabel?.text, "auth refactor\nflaky tests", "the text comes back after relaunch")
+        checker.check(restoredLabel?.isEditing == false, "and is not left in edit mode")
+        checker.close(restoredNode?.worldFrame.origin.x ?? 0, node.worldFrame.origin.x, 1, "the label comes back where it was")
+        checker.close(restoredNode?.worldFrame.width ?? 0, node.worldFrame.width, 1, "and at the same size")
 
         window2.close()
         window.close()
@@ -2097,7 +2273,12 @@ enum SelfTest {
         node.mouseUp(with: up)
     }
 
-    private static func mouseEvent(_ type: NSEvent.EventType, at canvasPoint: CGPoint, in canvas: CanvasView) -> NSEvent? {
+    private static func mouseEvent(
+        _ type: NSEvent.EventType,
+        at canvasPoint: CGPoint,
+        in canvas: CanvasView,
+        clickCount: Int = 1
+    ) -> NSEvent? {
         guard let window = canvas.window else { return nil }
         let windowPoint = canvas.convert(canvasPoint, to: nil)
         return NSEvent.mouseEvent(
@@ -2108,7 +2289,7 @@ enum SelfTest {
             windowNumber: window.windowNumber,
             context: nil,
             eventNumber: 0,
-            clickCount: 1,
+            clickCount: clickCount,
             pressure: 1
         )
     }

@@ -78,6 +78,8 @@ struct NodeSpec: Codable, Identifiable, Equatable {
     /// content-addressed asset store. Stored as a name, not a path, so the
     /// canvas survives the store (or the home directory) moving.
     var asset: String?
+    /// For `text` nodes: the label's text. Written whenever an edit commits.
+    var text: String?
 
     init(
         id: UUID = UUID(),
@@ -90,6 +92,7 @@ struct NodeSpec: Codable, Identifiable, Equatable {
         customTitle: String? = nil,
         sessionID: String? = nil,
         asset: String? = nil,
+        text: String? = nil,
         workspaceID: UUID? = nil
     ) {
         self.id = id
@@ -105,6 +108,7 @@ struct NodeSpec: Codable, Identifiable, Equatable {
         self.customTitle = customTitle
         self.sessionID = sessionID
         self.asset = asset
+        self.text = text
         self.workspaceID = workspaceID
     }
 

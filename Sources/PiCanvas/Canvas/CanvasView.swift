@@ -23,6 +23,8 @@ protocol CanvasViewDelegate: AnyObject {
     func canvasView(_ canvas: CanvasView, didRename nodeID: UUID, to title: String)
     /// An image file was dropped on the canvas. Returns true when a node was made.
     func canvasView(_ canvas: CanvasView, didReceiveImageDropOf url: URL, atWorldPoint point: CGPoint) -> Bool
+    /// A double-click landed on empty canvas: make a text label there.
+    func canvasView(_ canvas: CanvasView, didRequestTextNodeAt point: CGPoint)
     /// A node was dropped onto another node. Returns true when the drop was used.
     func canvasView(_ canvas: CanvasView, nodeID: UUID, didReceiveDropFrom sourceNodeID: UUID) -> Bool
 }
@@ -364,6 +366,14 @@ final class CanvasView: NSView {
     override func mouseDown(with event: NSEvent) {
         // Only reachable when the click missed every node.
         window?.makeFirstResponder(self)
+
+        // Double-clicking the plane is how a text label is born.
+        if event.clickCount == 2 {
+            let world = worldPoint(fromScreen: convert(event.locationInWindow, from: nil))
+            canvasDelegate?.canvasView(self, didRequestTextNodeAt: world)
+            return
+        }
+
         isPanning = true
         didMoveDuringPan = false
         panStartScreen = convert(event.locationInWindow, from: nil)
