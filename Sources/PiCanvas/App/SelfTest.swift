@@ -125,6 +125,7 @@ enum SelfTest {
         testGhosttyConfig(checker: checker)
         testAttentionAndJump(checker: checker)
         testScrollRouting(checker: checker)
+        testZoomScrollRouting(checker: checker)
         testExitBehaviour(checker: checker)
         testKeyRepeat(checker: checker)
         testScrollbackPersistence(checker: checker)
@@ -684,6 +685,91 @@ enum SelfTest {
             KeyboardDefaults.overrideWarning() == nil || KeyboardDefaults.explicitOverride() != nil,
             "an override warning only appears when something really overrides us"
         )
+    }
+
+    /// A zoom gesture belongs to the canvas even when it lands on the focused
+    /// terminal, and shift must stay available to the terminal (it bypasses mouse
+    /// reporting so you can select text).
+    private static func testZoomScrollRouting(checker: Checker) {
+        print("\nzoom scroll routing")
+
+        func scrollEvent(_ flags: CGEventFlags, deltaY: Int32 = 12) -> NSEvent? {
+            guard let cgEvent = CGEvent(
+                scrollWheelEvent2Source: nil,
+                units: .pixel,
+                wheelCount: 1,
+                wheel1: deltaY,
+                wheel2: 0,
+                wheel3: 0
+            ) else { return nil }
+            cgEvent.flags = flags
+            return NSEvent(cgEvent: cgEvent)
+        }
+
+        guard let command = scrollEvent(.maskCommand),
+              let option = scrollEvent(.maskAlternate),
+              let shift = scrollEvent(.maskShift),
+              let plain = scrollEvent([]) else {
+            checker.check(false, "scroll events could be constructed")
+            return
+        }
+
+        checker.check(CanvasView.isZoomScroll(command), "⌘-scroll is a zoom gesture")
+        checker.check(CanvasView.isZoomScroll(option), "⌥-scroll is a zoom gesture too")
+        checker.check(!CanvasView.isZoomScroll(plain), "a plain scroll is not a zoom gesture")
+        checker.check(!CanvasView.isZoomScroll(shift), "shift-scroll is not a zoom gesture")
+
+        let canvas = CanvasView(frame: CGRect(x: 0, y: 0, width: 1200, height: 800))
+        let window = NSWindow(
+            contentRect: canvas.frame,
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = canvas
+        window.makeKeyAndOrderFront(nil)
+
+        let layoutURL = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("picanvas-zoomscroll-\(UUID().uuidString).json")
+        let controller = CanvasController(canvas: canvas, store: LayoutStore(fileURL: layoutURL))
+        controller.contentFactory = { _ in RecordingContent() }
+
+        controller.newNode(kind: .shell)
+        controller.newNode(kind: .shell)
+        guard let focused = canvas.nodeViews.last, let other = canvas.nodeViews.first else {
+            checker.check(false, "nodes created")
+            window.close()
+            return
+        }
+        let onFocused = CGPoint(x: focused.frame.midX, y: focused.frame.midY)
+        let onOther = CGPoint(x: other.frame.midX, y: other.frame.midY)
+
+        checker.check(
+            canvas.canvasHandlesScroll(command, at: onFocused),
+            "⌘-scroll zooms the canvas even over the focused terminal"
+        )
+        checker.check(
+            canvas.canvasHandlesScroll(option, at: onFocused),
+            "⌥-scroll zooms the canvas even over the focused terminal"
+        )
+        checker.check(
+            !canvas.canvasHandlesScroll(plain, at: onFocused),
+            "a plain scroll still reaches the focused terminal"
+        )
+        checker.check(
+            !canvas.canvasHandlesScroll(shift, at: onFocused),
+            "shift-scroll is left to the terminal, which uses it to select text"
+        )
+        checker.check(
+            canvas.canvasHandlesScroll(plain, at: onOther),
+            "a plain scroll over an unfocused terminal pans the canvas"
+        )
+        checker.check(
+            canvas.canvasHandlesScroll(command, at: CGPoint(x: 5, y: 5)),
+            "⌘-scroll over empty canvas zooms"
+        )
+
+        window.close()
     }
 
     /// Quitting a shell should close its node, but a failure should leave it

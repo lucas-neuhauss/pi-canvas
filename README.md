@@ -93,13 +93,16 @@ explicit setting of your own still wins — and if that happens the app says so 
 the log, with the one-line command to override it.
 
 Mouse: two-finger scroll pans (content follows your fingers, like any other
-canvas app), pinch zooms, `⌘`+scroll zooms, drag a title bar to move a node,
-drag **any border or corner** to resize (the cursor changes), click `×` or
-anywhere in a node to focus it and raise it.
+canvas app), pinch zooms, `⌘`+scroll or `⌥`+scroll zooms, drag a title bar to
+move a node, drag **any border or corner** to resize (the cursor changes), click
+`×` or anywhere in a node to focus it and raise it.
 
-Scrolling only reaches a terminal when that node is the focused one. Everywhere
-else it moves the canvas, so scrolling across a wall of terminals never scrolls
-whichever pane happens to be under the pointer.
+Scrolling only reaches a terminal when that node is the focused one, and a zoom
+gesture always belongs to the canvas — `⌘`/`⌥`+scroll zooms even directly over a
+focused terminal, because that is exactly when you want to zoom. `⇧`+scroll is
+left to the terminal, which uses it to bypass mouse reporting so you can select
+text. Both zoom modifiers are accepted because conventions differ: browsers,
+Figma and Preview use `⌘`; Photoshop, Sketch and Maestro use `⌥`.
 
 ## Agent awareness
 
@@ -209,11 +212,11 @@ to iterate on and has no external moving parts.
 ## Testing
 
 ```sh
-# 168 checks: coordinate maths, zoom anchoring, drag, resize from every border,
+# 178 checks: coordinate maths, zoom anchoring, drag, resize from every border,
 # delete, persistence round-trip, process launch, session binding, exit
-# behaviour, scroll routing, key repeat, the agent status state machine, the
-# needs-you indicator and jump, scrollback snapshot/restore, zoom-vs-resize
-# behaviour, Ghostty config parsing, and three real-PTY tests
+# behaviour, scroll and zoom-scroll routing, key repeat, the agent status state
+# machine, the needs-you indicator and jump, scrollback snapshot/restore,
+# zoom-vs-resize behaviour, Ghostty config parsing, and three real-PTY tests
 ./build/PiCanvas.app/Contents/MacOS/PiCanvas --self-test
 
 # Render a window with two nodes to PNG without a display server

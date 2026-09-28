@@ -272,13 +272,33 @@ final class CanvasView: NSView {
 
     override func scrollWheel(with event: NSEvent) {
         let location = convert(event.locationInWindow, from: nil)
-        // ⌘-scroll zooms; a plain two-finger scroll pans, matching every other canvas app.
-        if event.modifierFlags.contains(.command) {
+        if CanvasView.isZoomScroll(event) {
             let factor = exp(-event.scrollingDeltaY * 0.012)
             setZoom(zoom * factor, anchorScreen: location)
         } else {
+            // A plain two-finger scroll pans, matching every other canvas app.
             panBy(CGPoint(x: event.scrollingDeltaX, y: event.scrollingDeltaY))
         }
+    }
+
+    /// Whether a scroll is a zoom gesture.
+    ///
+    /// Both ⌘ and ⌥ are accepted because the conventions differ: browsers, Figma
+    /// and Preview zoom with ⌘, while Photoshop, Sketch and Maestro zoom with ⌥.
+    /// Shift is deliberately *not* included — it is how you bypass mouse
+    /// reporting to select text in a terminal.
+    static func isZoomScroll(_ event: NSEvent) -> Bool {
+        event.modifierFlags.contains(.command) || event.modifierFlags.contains(.option)
+    }
+
+    /// Whether the canvas should consume this scroll itself.
+    ///
+    /// A zoom gesture always belongs to the canvas, even directly over the
+    /// focused terminal: otherwise zooming stops working whenever you are typing,
+    /// which is exactly when you tend to want it.
+    func canvasHandlesScroll(_ event: NSEvent, at canvasPoint: CGPoint) -> Bool {
+        if CanvasView.isZoomScroll(event) { return true }
+        return !terminalHandlesScroll(at: canvasPoint)
     }
 
     override func magnify(with event: NSEvent) {
@@ -426,9 +446,9 @@ final class CanvasView: NSView {
                 let canvasPoint = self.convert(event.locationInWindow, from: nil)
                 // Status-bar and other chrome clicks arrive here too.
                 guard self.bounds.contains(canvasPoint) else { return event }
-                guard !self.terminalHandlesScroll(at: canvasPoint) else { return event }
-                // Otherwise the canvas pans (or ⌘-zooms), and the terminal under
-                // the pointer never sees the event.
+                // Otherwise the canvas pans (or zooms), and the terminal under the
+                // pointer never sees the event.
+                guard self.canvasHandlesScroll(event, at: canvasPoint) else { return event }
                 self.scrollWheel(with: event)
                 return nil
             }
