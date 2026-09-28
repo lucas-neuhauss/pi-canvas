@@ -34,6 +34,14 @@ protocol NodeContent: AnyObject {
     /// terminals; other kinds ignore it.
     func send(text: String)
 
+    /// Begin editing the content in place, when the content supports it (a text
+    /// label). Terminals take typing continuously, so this does nothing there.
+    func beginEditing()
+
+    /// Commit any edit in progress. The canvas calls this on quit so text typed
+    /// but not yet committed is not lost.
+    func commitPendingEdits()
+
     /// The content as text, when the implementation can read it back. Used by
     /// the scrollback snapshot and by the self-test.
     func readText() -> String?
@@ -45,7 +53,17 @@ extension NodeContent {
     func setContentScale(_ scale: CGFloat) {}
     var contentScale: CGFloat { 1 }
     func send(text: String) {}
+    func beginEditing() {}
+    func commitPendingEdits() {}
     func readText() -> String? { nil }
+}
+
+/// A content *view* that can be edited in place (a text label). The node frame
+/// routes double-clicks here, because whether a second click means "edit" is a
+/// property of the view, not of the canvas.
+@MainActor
+protocol InlineEditableView: AnyObject {
+    func beginInlineEditing()
 }
 
 /// Content that owns a child process (a terminal). Process-starting is optional

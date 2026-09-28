@@ -6,6 +6,8 @@ import AppKit
 final class CanvasController: NSObject {
 
     static let defaultNodeSize = CGSize(width: 720, height: 440)
+    /// Labels start as a short line, not a terminal pane.
+    static let defaultTextNodeSize = CGSize(width: 280, height: 64)
 
     let canvas: CanvasView
     private let workspaceStore: WorkspaceStore
@@ -537,6 +539,32 @@ final class CanvasController: NSObject {
         return frame.width / frame.height
     }
 
+    // MARK: - Text labels
+
+    /// Creates a label at a point (a double-click on empty canvas) and puts the
+    /// caret in it straight away.
+    @discardableResult
+    func createTextNode(at worldPoint: CGPoint, text: String = "") -> UUID {
+        let size = CanvasController.defaultTextNodeSize
+        let origin = CGPoint(
+            x: (worldPoint.x - size.width / 2).rounded(),
+            y: (worldPoint.y - size.height / 2).rounded()
+        )
+        let spec = NodeSpec(
+            kind: .text,
+            worldFrame: CGRect(origin: origin, size: size),
+            workingDirectory: defaultWorkingDirectory,
+            executable: "",
+            arguments: [],
+            text: text,
+            workspaceID: activeWorkspaceID
+        )
+        add(spec: spec, start: true, select: true)
+        reveal(spec.worldFrame)
+        contents[spec.id]?.beginEditing()
+        return spec.id
+    }
+
     /// Finds a spot for a new node that does not sit on top of an existing one.
     ///
     /// Nodes are tiled horizontally: anything whose vertical band overlaps the
@@ -670,6 +698,15 @@ final class CanvasController: NSObject {
             self.canvas.select(node, focusContent: false)
         }
 
+        // Committed label text is the node's payload: store it and save.
+        if let label = content as? TextContent {
+            label.onTextChange = { [weak self] value in
+                guard let self else { return }
+                self.specs[id]?.text = value
+                self.persist()
+            }
+        }
+
         // Process lifecycle only exists for terminals.
         guard let process = content as? ProcessContent else { return }
 
@@ -743,6 +780,12 @@ final class CanvasController: NSObject {
             watcher.stop()
         }
         watchers.removeAll()
+
+        // Text typed but not committed (a label still in edit mode) is committed
+        // before the save below, so quitting never eats the last sentence.
+        for content in contents.values {
+            content.commitPendingEdits()
+        }
 
         // Capture what is on screen before the processes go away, so reopening
         // the app shows the output you left behind.
@@ -825,11 +868,13 @@ final class CanvasController: NSObject {
         canvas.select(node, focusContent: true)
     }
 
-    /// The node switcher's rows: this workspace's nodes only.
+    /// The node switcher's rows: this workspace's nodes only. Labels are
+    /// signposts, not destinations, so they stay out of the switcher.
     func paletteEntries() -> [PaletteRow] {
         canvas.orderedNodeIDs.compactMap { id -> PaletteRow? in
             guard let node = canvas.nodeView(withID: id), let spec = specs[id],
-                  (spec.workspaceID ?? activeWorkspaceID) == activeWorkspaceID else { return nil }
+                  (spec.workspaceID ?? activeWorkspaceID) == activeWorkspaceID,
+                  spec.kind != .text else { return nil }
             let accent = spec.kind.accent
             return PaletteRow(
                 id: id,
@@ -905,10 +950,12 @@ final class CanvasController: NSObject {
         onStateChange?()
     }
 
-    /// Starts an inline rename on the focused node.
+    /// Starts an inline rename on the focused node. A label has no title to
+    /// rename: its text is edited directly.
     @discardableResult
     func renameFocusedNode() -> Bool {
         guard let id = canvas.focusedNodeID ?? canvas.selectedNodeID,
+              specs[id]?.kind != .text,
               let node = canvas.nodeView(withID: id) else { return false }
         node.beginRenaming()
         return true
@@ -983,6 +1030,10 @@ extension CanvasController: CanvasViewDelegate {
 
     func canvasView(_ canvas: CanvasView, didReceiveImageDropOf url: URL, atWorldPoint point: CGPoint) -> Bool {
         createImageNode(contentsOf: url, at: point) != nil
+    }
+
+    func canvasView(_ canvas: CanvasView, didRequestTextNodeAt point: CGPoint) {
+        createTextNode(at: point)
     }
 
     func canvasView(_ canvas: CanvasView, nodeID: UUID, didReceiveDropFrom sourceNodeID: UUID) -> Bool {

@@ -101,6 +101,14 @@ The integration that makes it worth more than a picture viewer: **drag an image
 node onto a pi node** and the asset's path is typed into that agent's terminal,
 followed by a newline — the agent can then read the file.
 
+## Labels
+
+Double-click empty canvas and a label appears, already taking text: type, then
+`esc` (or click away) to commit. One font, one size; the text scales with canvas
+zoom, and the box word-wraps and scrolls. Click and drag the text itself to move
+the label, and its border to resize. Labels are signposts, not destinations, so
+`⌘K` leaves them out. They persist with the workspace like any other node.
+
 ## Keyboard
 
 | Shortcut | Action |
@@ -231,6 +239,7 @@ Sources/PiCanvas/
     CanvasView.swift            infinite pan/zoom plane, world↔screen maths
     NodeFrameView.swift         node chrome: title bar, close, resize, status pill
     ImageContent.swift          image node: renders, keeps its ratio, drags out
+    TextContent.swift           label node: in-place editing, font follows zoom
   Model/
     AgentModel.swift            NodeSpec / LayoutFile / NodeKind
     LayoutStore.swift           debounced atomic JSON persistence
@@ -275,14 +284,16 @@ to iterate on and has no external moving parts.
 ## Testing
 
 ```sh
-# 296 checks: coordinate maths, zoom anchoring, drag, resize from every border,
+# 323 checks: coordinate maths, zoom anchoring, drag, resize from every border,
 # delete, renaming, workspaces (migration, keep-alive, lazy start, per-workspace
 # viewports, CRUD), persistence round-trip, process launch, session binding, exit
 # behaviour, scroll and zoom-scroll routing, key repeat, switcher ranking, the
 # agent status state machine, the needs-you indicator and jump, scrollback
 # snapshot/restore, zoom-vs-resize behaviour, node kinds and legacy decoding, the
 # asset store (dedup, hash naming, pruning), image drop/sizing/aspect-locked
-# resize/drag-to-pi/persistence, Ghostty config parsing, and three real-PTY tests
+# resize/drag-to-pi/persistence, label creation/editing/commit/move/resize/
+# rendering/zoom-scaling/persistence and its absence from the switcher, Ghostty
+# config parsing, and three real-PTY tests
 ./build/PiCanvas.app/Contents/MacOS/PiCanvas --self-test
 
 # Render a window with two nodes to PNG without a display server
@@ -356,11 +367,11 @@ PiCanvas is force-quit, the child processes die with the pty.
 ## Not built yet
 
 - More node kinds, tracked as issues:
-  [#2 text labels](https://github.com/lucas-neuhauss/pi-canvas/issues/2) ·
   [#3 notes](https://github.com/lucas-neuhauss/pi-canvas/issues/3) ·
-  [#4 browser](https://github.com/lucas-neuhauss/pi-canvas/issues/4) — all three
+  [#4 browser](https://github.com/lucas-neuhauss/pi-canvas/issues/4) — both
   build on the content seam that
-  [#1 image nodes](https://github.com/lucas-neuhauss/pi-canvas/issues/1)
+  [#1 image nodes](https://github.com/lucas-neuhauss/pi-canvas/issues/1) and
+  [#2 text labels](https://github.com/lucas-neuhauss/pi-canvas/issues/2)
   introduced
 - Cost and token history over time (the transcript already carries `usage`; only
   the current totals are shown)
