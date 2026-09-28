@@ -187,7 +187,7 @@ final class CanvasController: NSObject {
 
     private func add(spec: NodeSpec, start: Bool, select: Bool) {
         let node = NodeFrameView(nodeID: spec.id, worldFrame: spec.worldFrame, kind: spec.kind)
-        node.title = spec.title ?? spec.kind.displayName
+        node.title = spec.displayTitle
         node.subtitle = Self.abbreviate(spec.workingDirectory)
         specs[spec.id] = spec
 
@@ -228,8 +228,12 @@ final class CanvasController: NSObject {
 
         content.onTitleChange = { [weak self] title in
             guard let self, let node = self.canvas.nodeView(withID: id) else { return }
-            node.title = title
+            // Remember what the terminal calls itself, but never let it overwrite a
+            // name the user chose.
             self.specs[id]?.title = title
+            if self.specs[id]?.customTitle == nil {
+                node.title = title
+            }
             self.persist()
         }
 
@@ -422,6 +426,27 @@ final class CanvasController: NSObject {
         return target
     }
 
+    /// Names a node. An empty name clears it, so the terminal's own title shows
+    /// again.
+    func renameNode(id: UUID, to name: String) {
+        guard var spec = specs[id], let node = canvas.nodeView(withID: id) else { return }
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        spec.customTitle = trimmed.isEmpty ? nil : trimmed
+        specs[id] = spec
+        node.title = spec.displayTitle
+        persist()
+        onStateChange?()
+    }
+
+    /// Starts an inline rename on the focused node.
+    @discardableResult
+    func renameFocusedNode() -> Bool {
+        guard let id = canvas.focusedNodeID ?? canvas.selectedNodeID,
+              let node = canvas.nodeView(withID: id) else { return false }
+        node.beginRenaming()
+        return true
+    }
+
     // MARK: - Viewport
 
     func zoomIn() { canvas.zoomIn() }
@@ -483,6 +508,10 @@ extension CanvasController: CanvasViewDelegate {
 
     func canvasView(_ canvas: CanvasView, didChangeSelection selection: UUID?) {
         onStateChange?()
+    }
+
+    func canvasView(_ canvas: CanvasView, didRename nodeID: UUID, to title: String) {
+        renameNode(id: nodeID, to: title)
     }
 
     func canvasView(_ canvas: CanvasView, didFocus nodeID: UUID?) {

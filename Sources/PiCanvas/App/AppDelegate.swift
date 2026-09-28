@@ -98,6 +98,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                 controller.newNode(kind: .pi)
             case "--show-palette":
                 showPalette = true
+            case "--rename":
+                // Start an inline rename once the terminals have set their titles.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+                    self?.controller.renameFocusedNode()
+                }
             default:
                 if argument.hasPrefix("--palette-query=") {
                     paletteQuery = String(argument.dropFirst("--palette-query=".count))
@@ -175,6 +180,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         }
     }
 
+    @objc private func renameNode(_ sender: Any?) {
+        controller.renameFocusedNode()
+    }
+
     @objc private func zoomIn(_ sender: Any?) { controller.zoomIn() }
     @objc private func zoomOut(_ sender: Any?) { controller.zoomOut() }
     @objc private func zoomActual(_ sender: Any?) { controller.resetZoom() }
@@ -219,6 +228,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             return !(controller?.agentsNeedingAttention.isEmpty ?? true)
         case #selector(showTerminalPalette(_:)):
             return (controller?.nodeCount ?? 0) > 0
+        case #selector(renameNode(_:)):
+            return controller?.focusedNodeID != nil
         default:
             return true
         }
@@ -295,6 +306,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         fileMenu.addItem(folderItem)
 
         fileMenu.addItem(.separator())
+
+        let renameItem = NSMenuItem(
+            title: "Rename Node…",
+            action: #selector(renameNode(_:)),
+            // F2, the rename key almost everywhere else.
+            keyEquivalent: String(UnicodeScalar(NSF2FunctionKey)!)
+        )
+        renameItem.target = self
+        fileMenu.addItem(renameItem)
 
         let closeNodeItem = NSMenuItem(
             title: "Close Node",

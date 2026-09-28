@@ -18,6 +18,8 @@ protocol CanvasViewDelegate: AnyObject {
     func canvasView(_ canvas: CanvasView, didChangeSelection selection: UUID?)
     /// The focused node changed and its content should take first responder.
     func canvasView(_ canvas: CanvasView, didFocus nodeID: UUID?)
+    /// The user renamed a node.
+    func canvasView(_ canvas: CanvasView, didRename nodeID: UUID, to title: String)
 }
 
 /// An infinite, zoomable, pannable plane that hosts node views.
@@ -518,6 +520,11 @@ private final class NodeDelegateProxy: NodeFrameViewDelegate {
 
     func nodeFrameViewDidRequestFocus(_ node: NodeFrameView) {
         canvas?.select(node, focusContent: true)
+    }
+
+    func nodeFrameView(_ node: NodeFrameView, didRenameTo title: String) {
+        guard let canvas else { return }
+        canvas.canvasDelegate?.canvasView(canvas, didRename: node.nodeID, to: title)
     }
 
     func nodeFrameViewDidTakeFirstResponder(_ node: NodeFrameView) {

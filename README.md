@@ -80,6 +80,7 @@ and leaving that terminal closes the node.
 | `⌘+` / `⌘-` / `⌘0` | Zoom in / out / actual size |
 | `⌘9` | Zoom to fit every node |
 | `⌘K` | Go to terminal… — the node switcher |
+| `F2` | Rename the focused node (or double-click its title bar) |
 | `⌘J` | Jump to the next agent that needs you (pans to it if off-screen) |
 | `Delete` | Close the selected node (when the canvas, not a terminal, has focus) |
 | `⌘C` / `⌘V` / `⌘A` | Copy / paste / select all, routed to the focused terminal |
@@ -104,6 +105,18 @@ focused terminal, because that is exactly when you want to zoom. `⇧`+scroll is
 left to the terminal, which uses it to bypass mouse reporting so you can select
 text. Both zoom modifiers are accepted because conventions differ: browsers,
 Figma and Preview use `⌘`; Photoshop, Sketch and Maestro use `⌥`.
+
+## Naming a node
+
+Double-click a node's title bar to name it, or press `F2`. Return commits,
+Escape cancels, and clicking away commits. Clearing the name hands the title back
+to the terminal, which is what it shows when you have not named it — usually the
+shell's `user@host:dir`, or `π - <project>` for an agent.
+
+A name you give wins over the terminal's own title for good, so a shell that
+announces a new directory does not rename your node out from under you, and it is
+what `⌘K` searches — which is the point: name a node `auth refactor` and it stays
+findable for as long as it exists.
 
 ## Switching between nodes
 
@@ -226,8 +239,8 @@ to iterate on and has no external moving parts.
 ## Testing
 
 ```sh
-# 199 checks: coordinate maths, zoom anchoring, drag, resize from every border,
-# delete, persistence round-trip, process launch, session binding, exit
+# 212 checks: coordinate maths, zoom anchoring, drag, resize from every border,
+# delete, renaming, persistence round-trip, process launch, session binding, exit
 # behaviour, scroll and zoom-scroll routing, key repeat, switcher ranking, the
 # agent status state machine, the needs-you indicator and jump, scrollback
 # snapshot/restore, zoom-vs-resize behaviour, Ghostty config parsing, and three
@@ -240,9 +253,10 @@ to iterate on and has no external moving parts.
 # Screenshot just the app window (needs Screen Recording permission)
 ./scripts/window-shot.sh /tmp/window.png
 
-# Launch with nodes already open, and with the switcher showing
+# Launch with nodes already open, with the switcher showing, or mid-rename
 ./build/PiCanvas.app/Contents/MacOS/PiCanvas --new-terminal --new-pi
 ./build/PiCanvas.app/Contents/MacOS/PiCanvas --show-palette --palette-query=need
+./build/PiCanvas.app/Contents/MacOS/PiCanvas --new-pi --rename
 ```
 
 The self-test synthesises real `NSEvent`s to drive the actual drag and resize

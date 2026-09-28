@@ -9,6 +9,8 @@ protocol NodeFrameViewDelegate: AnyObject {
     func nodeFrameViewDidRequestFocus(_ node: NodeFrameView)
     /// The terminal inside the node became first responder on its own (user clicked it).
     func nodeFrameViewDidTakeFirstResponder(_ node: NodeFrameView)
+    /// The user finished editing the node's name.
+    func nodeFrameView(_ node: NodeFrameView, didRenameTo title: String)
 }
 
 /// Base sizes for a node's chrome, in screen pixels at 100% zoom. Everything is
@@ -170,6 +172,15 @@ final class NodeFrameView: NSView {
     private var dragStartWorldFrame: CGRect = .zero
     private var didDrag = false
 
+    /// The field shown while renaming, if any.
+    private var titleField: NSTextField?
+
+    /// True while the node's name is being edited.
+    var isRenaming: Bool { titleField != nil }
+
+    /// The editing field, so callers (and tests) can drive it.
+    var renamingField: NSTextField? { titleField }
+
     private var chrome: NodeChrome { NodeChrome(scale: chromeScale) }
 
     // MARK: - Init
@@ -238,6 +249,9 @@ final class NodeFrameView: NSView {
     override func layout() {
         super.layout()
         contentView?.frame = contentRect
+        if let titleField {
+            titleField.frame = renamingFieldRect()
+        }
         layer?.cornerRadius = chrome.cornerRadius
         layer?.shadowPath = CGPath(
             roundedRect: bounds,
@@ -296,6 +310,15 @@ final class NodeFrameView: NSView {
         // The close button is small and specific, so it wins over the corner band.
         if closeRect.contains(point) {
             dragMode = .closeButton
+            return
+        }
+
+        // Double-clicking the title bar renames it, the gesture Finder uses. This
+        // is checked before anything needing canvas coordinates, so renaming does
+        // not depend on world geometry.
+        if event.clickCount == 2, point.y <= chrome.titleBarHeight, resizeEdge(at: point) == nil {
+            dragMode = .none
+            beginRenaming()
             return
         }
 
@@ -393,6 +416,79 @@ final class NodeFrameView: NSView {
     /// Keeps dragged nodes on a whole world-unit grid so layouts stay tidy.
     private func snap(_ point: CGPoint) -> CGPoint {
         CGPoint(x: point.x.rounded(), y: point.y.rounded())
+    }
+
+    // MARK: - Renaming
+
+    /// Edits the node's name in place. A real text field, so selection, the caret
+    /// and input methods all behave.
+    func beginRenaming() {
+        guard titleField == nil else {
+            window?.makeFirstResponder(titleField)
+            return
+        }
+
+        let chrome = chrome
+        let field = NSTextField(frame: renamingFieldRect())
+        field.stringValue = title
+        field.font = NSFont.systemFont(ofSize: chrome.titleFontSize, weight: .semibold)
+        field.textColor = NSColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.95)
+        field.isBezeled = false
+        field.drawsBackground = true
+        field.backgroundColor = NSColor(srgbRed: 0.19, green: 0.20, blue: 0.24, alpha: 1)
+        field.focusRingType = .none
+        // A visible input, not a subtle shade: you should see where you are typing.
+        field.wantsLayer = true
+        field.layer?.cornerRadius = 5
+        field.layer?.borderWidth = 1
+        field.layer?.borderColor = NSColor(srgbRed: 0.42, green: 0.60, blue: 0.98, alpha: 0.9).cgColor
+        field.placeholderString = "Name this node"
+        field.delegate = self
+        addSubview(field)
+        titleField = field
+        needsDisplay = true
+
+        window?.makeFirstResponder(field)
+        field.currentEditor()?.selectAll(nil)
+    }
+
+    func commitRenaming() {
+        guard let field = titleField else { return }
+        let name = field.stringValue
+        finishRenaming()
+        nodeDelegate?.nodeFrameView(self, didRenameTo: name)
+    }
+
+    func cancelRenaming() {
+        guard titleField != nil else { return }
+        finishRenaming()
+    }
+
+    private func finishRenaming() {
+        // Clear the reference *before* removing the view: removing it ends editing,
+        // which calls back in here, and dropping the reference first is what keeps
+        // an Escape from being turned into a commit.
+        let field = titleField
+        titleField = nil
+        field?.removeFromSuperview()
+        needsDisplay = true
+        // Hand the keyboard back: the terminal is where you were working.
+        nodeDelegate?.nodeFrameViewDidRequestFocus(self)
+    }
+
+    private func renamingFieldRect() -> CGRect {
+        let chrome = chrome
+        let left = chrome.padding + chrome.dotDiameter + 9
+        // Stop short of the close button so it stays clickable.
+        let right = bounds.width - chrome.padding - chrome.closeSize - 8
+        let height = max(chrome.titleFontSize + 6, 16)
+        let rect = CGRect(
+            x: left - 4,
+            y: (chrome.titleBarHeight - height) / 2,
+            width: max(right - left + 4, 40),
+            height: height
+        )
+        return rect.integral
     }
 
     // MARK: - Drawing
@@ -526,6 +622,8 @@ final class NodeFrameView: NSView {
         paragraph.lineBreakMode = .byTruncatingTail
 
         let titleText = title.isEmpty ? kind.displayName : title
+        // While renaming, the field shows the name instead.
+        guard !isRenaming else { return }
         let titleColor = NSColor(srgbRed: 1, green: 1, blue: 1, alpha: isFocused ? 0.94 : 0.72)
         let titleAttributes: [NSAttributedString.Key: Any] = [
             .font: titleFont,
@@ -568,6 +666,30 @@ final class NodeFrameView: NSView {
         }
     }
 
+}
+
+/// The rename field's behaviour: Return commits, Escape cancels, and clicking
+/// away commits the same way a Finder rename does.
+extension NodeFrameView: NSTextFieldDelegate {
+
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        switch commandSelector {
+        case #selector(NSResponder.insertNewline(_:)):
+            commitRenaming()
+            return true
+        case #selector(NSResponder.cancelOperation(_:)):
+            cancelRenaming()
+            return true
+        default:
+            return false
+        }
+    }
+
+    func controlTextDidEndEditing(_ obj: Notification) {
+        // Only if the field is still live; a commit or cancel already cleared it.
+        guard titleField != nil else { return }
+        commitRenaming()
+    }
 }
 
 /// Native frame-resize cursors where available, SF Symbol cursors elsewhere.

@@ -39,6 +39,9 @@ struct NodeSpec: Codable, Identifiable, Equatable {
     /// Last title the terminal reported, restored so the canvas looks the same
     /// before the new process has had a chance to set one.
     var title: String?
+    /// A name the user gave this node. When set it wins over the terminal's own
+    /// title, and survives the terminal renaming itself.
+    var customTitle: String?
     /// For `pi` nodes: the pi session this node owns. Passing it back to
     /// `pi --session-id` on relaunch resumes the same conversation, and keeping
     /// it per node means two agents in one directory never share a session.
@@ -52,6 +55,7 @@ struct NodeSpec: Codable, Identifiable, Equatable {
         executable: String,
         arguments: [String],
         title: String? = nil,
+        customTitle: String? = nil,
         sessionID: String? = nil
     ) {
         self.id = id
@@ -64,7 +68,14 @@ struct NodeSpec: Codable, Identifiable, Equatable {
         self.executable = executable
         self.arguments = arguments
         self.title = title
+        self.customTitle = customTitle
         self.sessionID = sessionID
+    }
+
+    /// What the node should show: your name if you gave it one, else whatever the
+    /// terminal last called itself.
+    var displayTitle: String {
+        customTitle ?? title ?? kind.displayName
     }
 
     var worldFrame: CGRect {

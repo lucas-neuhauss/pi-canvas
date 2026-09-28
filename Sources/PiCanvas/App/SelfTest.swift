@@ -50,6 +50,21 @@ enum SelfTest {
         }
     }
 
+    /// Records the node-chrome callbacks a person's gestures produce.
+    private final class RecordingNodeDelegate: NodeFrameViewDelegate {
+        var renamed: [String] = []
+        var focusRequests = 0
+        var closeRequests = 0
+
+        func nodeFrameViewDidRequestClose(_ node: NodeFrameView) { closeRequests += 1 }
+        func nodeFrameViewDidBeginInteraction(_ node: NodeFrameView) {}
+        func nodeFrameViewDidChangeFrame(_ node: NodeFrameView) {}
+        func nodeFrameViewDidEndInteraction(_ node: NodeFrameView) {}
+        func nodeFrameViewDidRequestFocus(_ node: NodeFrameView) { focusRequests += 1 }
+        func nodeFrameViewDidTakeFirstResponder(_ node: NodeFrameView) {}
+        func nodeFrameView(_ node: NodeFrameView, didRenameTo title: String) { renamed.append(title) }
+    }
+
     /// Records what the controller asked of a node's content.
     private final class RecordingContent: AgentContent {
         let view: NSView = NSView(frame: .zero)
@@ -129,6 +144,7 @@ enum SelfTest {
         testExitBehaviour(checker: checker)
         testKeyRepeat(checker: checker)
         testNodePalette(checker: checker)
+        testRenaming(checker: checker)
         testScrollbackPersistence(checker: checker)
         testTerminalRoundTrip(checker: checker)
         testResizeReflow(checker: checker)
@@ -872,6 +888,138 @@ enum SelfTest {
         checker.check(
             canvas.visibleWorldRect.intersects(target.worldFrame),
             "and brings it into view"
+        )
+
+        window.close()
+    }
+
+    /// A name you give a node has to beat the terminal's own title, and survive a
+    /// restart. The inline editor gets tested through the same gestures a person
+    /// uses, since double-click-to-rename is the whole interaction.
+    private static func testRenaming(checker: Checker) {
+        print("\nrenaming")
+
+        // --- the inline editor -------------------------------------------------
+        let node = NodeFrameView(
+            nodeID: UUID(),
+            worldFrame: CGRect(x: 0, y: 0, width: 420, height: 300),
+            kind: .shell
+        )
+        let editorWindow = NSWindow(
+            contentRect: CGRect(x: 0, y: 0, width: 420, height: 300),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        // Hosted in a canvas, as it is in the app.
+        let editorCanvas = CanvasView(frame: CGRect(x: 0, y: 0, width: 420, height: 300))
+        editorWindow.contentView = editorCanvas
+        editorCanvas.addNodeView(node)
+        editorWindow.makeKeyAndOrderFront(nil)
+        node.title = "before"
+        let delegate = RecordingNodeDelegate()
+        node.nodeDelegate = delegate
+
+        func click(_ count: Int, at point: CGPoint) -> NSEvent? {
+            NSEvent.mouseEvent(
+                with: .leftMouseDown,
+                location: node.convert(point, to: nil),
+                modifierFlags: [],
+                timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: editorWindow.windowNumber,
+                context: nil,
+                eventNumber: 0,
+                clickCount: count,
+                pressure: 1
+            )
+        }
+
+        if let single = click(1, at: CGPoint(x: 210, y: 12)) {
+            node.mouseDown(with: single)
+        }
+        checker.check(!node.isRenaming, "a single click on the title bar does not rename")
+
+        if let double = click(2, at: CGPoint(x: 210, y: 12)) {
+            node.mouseDown(with: double)
+        }
+        checker.check(node.isRenaming, "double-clicking the title bar starts an edit")
+        checker.equal(node.renamingField?.stringValue, "before", "the field starts with the current name")
+
+        node.renamingField?.stringValue = "intake form"
+        node.commitRenaming()
+        checker.check(!node.isRenaming, "committing closes the editor")
+        checker.equal(delegate.renamed, ["intake form"], "the new name is reported")
+
+        node.beginRenaming()
+        node.renamingField?.stringValue = "discarded"
+        node.cancelRenaming()
+        checker.equal(delegate.renamed, ["intake form"], "cancelling reports nothing")
+        checker.check(!node.isRenaming, "cancelling closes the editor")
+
+        editorWindow.close()
+
+        // --- naming, precedence and persistence --------------------------------
+        let canvas = CanvasView(frame: CGRect(x: 0, y: 0, width: 1200, height: 800))
+        let window = NSWindow(
+            contentRect: canvas.frame,
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = canvas
+        window.makeKeyAndOrderFront(nil)
+
+        let layoutURL = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("picanvas-rename-\(UUID().uuidString).json")
+        let store = LayoutStore(fileURL: layoutURL)
+        let controller = CanvasController(canvas: canvas, store: store)
+        let recorder = ContentRecorder()
+        controller.contentFactory = { spec in recorder.make(spec) }
+
+        controller.newNode(kind: .shell)
+        guard let id = canvas.nodeViews.last?.nodeID else {
+            checker.check(false, "node created")
+            window.close()
+            return
+        }
+
+        controller.renameNode(id: id, to: "  auth refactor  ")
+        checker.equal(canvas.nodeView(withID: id)?.title, "auth refactor", "the name is trimmed and shown")
+
+        // The terminal naming itself must not win.
+        recorder.content(for: id)?.onTitleChange?("zsh: ~/somewhere")
+        checker.equal(
+            canvas.nodeView(withID: id)?.title,
+            "auth refactor",
+            "a name you gave beats the terminal's own title"
+        )
+
+        controller.saveNow()
+        checker.equal(
+            store.load()?.nodes.first?.customTitle,
+            "auth refactor",
+            "the name is persisted"
+        )
+
+        // Clearing it hands the title back to the terminal.
+        controller.renameNode(id: id, to: "   ")
+        checker.equal(
+            canvas.nodeView(withID: id)?.title,
+            "zsh: ~/somewhere",
+            "clearing the name falls back to the terminal's title"
+        )
+
+        // And the name is what the switcher searches, which is the point of naming.
+        controller.renameNode(id: id, to: "auth refactor")
+        checker.equal(
+            controller.paletteEntries().first?.title,
+            "auth refactor",
+            "the switcher lists the name you gave"
+        )
+        checker.equal(
+            NodePaletteRanking.ranked(controller.paletteEntries(), query: "auth").count,
+            1,
+            "and can be found by typing it"
         )
 
         window.close()
