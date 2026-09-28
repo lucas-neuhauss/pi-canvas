@@ -116,6 +116,18 @@ enum ProcessResolver {
                 sessionID: sessionID,
                 workspaceID: workspaceID
             )
+        case .image, .text, .note, .browser:
+            // A kind without a process has no executable to resolve; whoever
+            // creates it supplies the kind-specific payload (an asset name, a
+            // URL, note text) on the spec afterwards.
+            return NodeSpec(
+                kind: kind,
+                worldFrame: worldFrame,
+                workingDirectory: directory,
+                executable: "",
+                arguments: [],
+                workspaceID: workspaceID
+            )
         }
     }
 

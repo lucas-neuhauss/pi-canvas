@@ -10,6 +10,7 @@ final class CanvasController: NSObject {
     let canvas: CanvasView
     private let workspaceStore: WorkspaceStore
     private let scrollbackStore: ScrollbackStore
+    private let assetStore: AssetStore
 
     /// One canvas's worth of metadata. The nodes themselves live in `specs`,
     /// tagged with the workspace they belong to.
@@ -33,13 +34,14 @@ final class CanvasController: NSObject {
     private var workspaceUseCounter = 0
 
     private(set) var specs: [UUID: NodeSpec] = [:]
-    private var contents: [UUID: AgentContent] = [:]
+    private var contents: [UUID: NodeContent] = [:]
     private var watchers: [UUID: PiSessionWatcher] = [:]
     private var cascadeIndex = 0
 
-    /// Creates the terminal for a node. Injected so the canvas does not depend on
-    /// the terminal implementation.
-    var contentFactory: ((NodeSpec) -> AgentContent)?
+    /// Creates the content for a node. Injected so the canvas does not depend on
+    /// the terminal implementation. Given the asset store so image content can
+    /// resolve its file.
+    var contentFactory: ((NodeSpec, AssetStore) -> NodeContent)?
 
     /// Where pi keeps its session transcripts. Overridable so tests can drive the
     /// agent-status chain without touching the user's real sessions.
@@ -71,11 +73,13 @@ final class CanvasController: NSObject {
     init(
         canvas: CanvasView,
         workspaceStore: WorkspaceStore = WorkspaceStore(),
-        scrollbackStore: ScrollbackStore = ScrollbackStore()
+        scrollbackStore: ScrollbackStore = ScrollbackStore(),
+        assetStore: AssetStore = AssetStore()
     ) {
         self.canvas = canvas
         self.workspaceStore = workspaceStore
         self.scrollbackStore = scrollbackStore
+        self.assetStore = assetStore
         super.init()
         canvas.canvasDelegate = self
     }
@@ -151,6 +155,10 @@ final class CanvasController: NSObject {
         // workspace's scrollback.
         let allNodeIDs = nodeSpecs.flatMap { $0.nodes.map(\.id) }
         scrollbackStore.prune(keeping: Set(allNodeIDs))
+        // Same for image assets: bytes are only dropped once no workspace in any
+        // of the files refers to them.
+        let allAssets = nodeSpecs.flatMap { $0.nodes.compactMap(\.asset) }
+        assetStore.prune(keeping: Set(allAssets))
 
         let active = workspaceRecords[0]
         activeWorkspaceID = active.id
@@ -238,7 +246,7 @@ final class CanvasController: NSObject {
     /// use at launch) start the first time that workspace is opened.
     private func startPendingNodes(in workspaceID: UUID) {
         for (id, spec) in specs where (spec.workspaceID ?? workspaceID) == workspaceID && !startedNodes.contains(id) {
-            guard let content = contents[id] else { continue }
+            guard let content = contents[id] as? ProcessContent else { continue }
             startedNodes.insert(id)
             let request = ProcessResolver.request(for: spec)
             NSLog(
@@ -452,6 +460,83 @@ final class CanvasController: NSObject {
         reveal(spec.worldFrame)
     }
 
+    // MARK: - Image nodes
+
+    /// Copies a dropped image into the asset store and creates a node for it,
+    /// centred on the drop point. Returns the new node's ID, or nil when the
+    /// file could not be stored.
+    @discardableResult
+    func createImageNode(contentsOf url: URL, at worldPoint: CGPoint? = nil) -> UUID? {
+        let assetName: String
+        do {
+            assetName = try assetStore.store(contentsOf: url)
+        } catch {
+            NSLog("[PiCanvas] could not add image %@: %@", url.path, error.localizedDescription)
+            return nil
+        }
+
+        let pixelSize = AssetStore.pixelSize(ofImageAt: assetStore.url(for: assetName))
+        let size = CanvasController.imageNodeSize(pixelSize: pixelSize)
+        let centre = worldPoint ?? canvas.viewportCentreWorldPoint()
+        let origin = CGPoint(
+            x: (centre.x - size.width / 2).rounded(),
+            y: (centre.y - size.height / 2).rounded()
+        )
+        let spec = NodeSpec(
+            kind: .image,
+            worldFrame: CGRect(origin: origin, size: size),
+            workingDirectory: defaultWorkingDirectory,
+            executable: "",
+            arguments: [],
+            title: url.lastPathComponent,
+            asset: assetName,
+            workspaceID: activeWorkspaceID
+        )
+        add(spec: spec, start: true, select: true)
+        reveal(spec.worldFrame)
+        return spec.id
+    }
+
+    /// The size a dropped image gets: its own aspect ratio, capped so a 6K
+    /// screenshot arrives 640pt wide and grown so a favicon still leaves room
+    /// for the node chrome.
+    static func imageNodeSize(pixelSize: CGSize?) -> CGSize {
+        guard let pixelSize, pixelSize.width > 0, pixelSize.height > 0 else {
+            return CGSize(width: 480, height: 320)
+        }
+        let maxSide: CGFloat = 640
+        let longest = max(pixelSize.width, pixelSize.height)
+        var scale = min(1, maxSide / longest)
+        // Grow small images until both node minimums are met, but only while
+        // the long side still fits the cap. An extreme panorama is left short
+        // rather than made enormous; its ratio matters more than the minimum.
+        let minimum = max(
+            NodeMetrics.minWorldWidth / pixelSize.width,
+            NodeMetrics.minWorldHeight / pixelSize.height,
+            1
+        )
+        if longest * scale * minimum <= maxSide {
+            scale *= minimum
+        }
+        return CGSize(
+            width: max((pixelSize.width * scale).rounded(), 1),
+            height: max((pixelSize.height * scale).rounded(), 1)
+        )
+    }
+
+    /// The ratio a node resizes along, read back from the stored asset (with the
+    /// node's own frame as the fallback when the file has gone missing).
+    private func imageAspectRatio(for spec: NodeSpec) -> CGFloat? {
+        if let asset = spec.asset,
+           let pixelSize = AssetStore.pixelSize(ofImageAt: assetStore.url(for: asset)),
+           pixelSize.width > 0, pixelSize.height > 0 {
+            return pixelSize.width / pixelSize.height
+        }
+        let frame = spec.worldFrame
+        guard frame.width > 0, frame.height > 0 else { return nil }
+        return frame.width / frame.height
+    }
+
     /// Finds a spot for a new node that does not sit on top of an existing one.
     ///
     /// Nodes are tiled horizontally: anything whose vertical band overlaps the
@@ -512,11 +597,15 @@ final class CanvasController: NSObject {
         node.subtitle = Self.abbreviate(spec.workingDirectory)
         specs[spec.id] = spec
 
-        let content = contentFactory?(spec) ?? MissingContent()
+        let content = contentFactory?(spec, assetStore) ?? MissingNodeContent()
         contents[spec.id] = content
         wire(content: content, node: node)
         content.setContentScale(canvas.zoom)
         node.contentView = content.view
+        // Images resize along their own ratio; terminals fill any box.
+        if spec.kind == .image {
+            node.contentAspectRatio = imageAspectRatio(for: spec)
+        }
         canvas.addNodeView(node)
         // Only the workspace on screen is visible.
         node.isHidden = spec.workspaceID != activeWorkspaceID
@@ -529,8 +618,10 @@ final class CanvasController: NSObject {
         // so a restart does not erase what you were reading. pi nodes are skipped:
         // pi redraws its own transcript from the session file, and injecting an
         // old TUI frame would be noise.
-        if spec.kind == .shell, let snapshot = scrollbackStore.load(for: spec.id) {
-            content.restoreScrollback(snapshot)
+        if spec.kind == .shell,
+           let process = content as? ProcessContent,
+           let snapshot = scrollbackStore.load(for: spec.id) {
+            process.restoreScrollback(snapshot)
         }
 
         if start {
@@ -545,9 +636,11 @@ final class CanvasController: NSObject {
     }
 
     /// Starts a node's process once, recording that it has been started so a later
-    /// workspace switch does not start it a second time.
+    /// workspace switch does not start it a second time. Content that owns no
+    /// process (an image) has nothing to start and is left alone.
     private func startNode(id: UUID) {
-        guard !startedNodes.contains(id), let spec = specs[id], let content = contents[id] else { return }
+        guard !startedNodes.contains(id), let spec = specs[id] else { return }
+        guard let content = contents[id] as? ProcessContent else { return }
         startedNodes.insert(id)
         let request = ProcessResolver.request(for: spec)
         NSLog(
@@ -558,7 +651,7 @@ final class CanvasController: NSObject {
         content.start(request)
     }
 
-    private func wire(content: AgentContent, node: NodeFrameView) {
+    private func wire(content: NodeContent, node: NodeFrameView) {
         let id = node.nodeID
 
         content.onTitleChange = { [weak self] title in
@@ -572,13 +665,21 @@ final class CanvasController: NSObject {
             self.persist()
         }
 
-        content.onExit = { [weak self] code in
+        content.onFocus = { [weak self] in
+            guard let self, let node = self.canvas.nodeView(withID: id) else { return }
+            self.canvas.select(node, focusContent: false)
+        }
+
+        // Process lifecycle only exists for terminals.
+        guard let process = content as? ProcessContent else { return }
+
+        process.onExit = { [weak self] code in
             guard let self, let node = self.canvas.nodeView(withID: id) else { return }
             // The process is gone; the transcript is no longer a live status.
             self.watchers[id]?.stop()
             self.watchers[id] = nil
             let describing = code.map { "exit \($0)" } ?? "killed by signal"
-            let grid = content.reportedGrid
+            let grid = process.reportedGrid
             NSLog("[PiCanvas] node %@ terminated: %@ (grid %dx%d)", id.uuidString, describing, grid.cols, grid.rows)
 
             // Leaving a shell should leave nothing behind, so a clean exit closes
@@ -600,19 +701,15 @@ final class CanvasController: NSObject {
             }
         }
 
-        content.onDirectoryChange = { [weak self] directory in
+        process.onDirectoryChange = { [weak self] directory in
             guard let self, let node = self.canvas.nodeView(withID: id) else { return }
             node.subtitle = Self.abbreviate(directory)
-        }
-
-        content.onFocus = { [weak self] in
-            guard let self, let node = self.canvas.nodeView(withID: id) else { return }
-            self.canvas.select(node, focusContent: false)
         }
     }
 
     func close(nodeID: UUID, persisting: Bool = true) {
         guard let node = canvas.nodeView(withID: nodeID) else { return }
+        let asset = specs[nodeID]?.asset
         watchers[nodeID]?.stop()
         watchers[nodeID] = nil
         agentsNeedingAttention.removeAll { $0 == nodeID }
@@ -620,10 +717,15 @@ final class CanvasController: NSObject {
         focusTimes[nodeID] = nil
         startedNodes.remove(nodeID)
         scrollbackStore.remove(for: nodeID)
-        contents[nodeID]?.terminate()
+        (contents[nodeID] as? ProcessContent)?.terminate()
         contents[nodeID] = nil
         canvas.removeNodeView(node)
         specs[nodeID] = nil
+        // Assets are deduplicated by hash, so one only goes away when the last
+        // node referring to it does.
+        if let asset, !specs.values.contains(where: { $0.asset == asset }) {
+            assetStore.remove(asset)
+        }
         onStateChange?()
         if persisting { persist() }
     }
@@ -645,13 +747,13 @@ final class CanvasController: NSObject {
         // Capture what is on screen before the processes go away, so reopening
         // the app shows the output you left behind.
         for (id, content) in contents where specs[id]?.kind == .shell {
-            if let snapshot = content.snapshotScrollback() {
-                scrollbackStore.save(snapshot, for: id)
-            }
+            guard let process = content as? ProcessContent,
+                  let snapshot = process.snapshotScrollback() else { continue }
+            scrollbackStore.save(snapshot, for: id)
         }
 
         for content in contents.values {
-            content.terminate()
+            (content as? ProcessContent)?.terminate()
         }
         contents.removeAll()
         saveNow()
@@ -877,6 +979,22 @@ extension CanvasController: CanvasViewDelegate {
 
     func canvasView(_ canvas: CanvasView, didRename nodeID: UUID, to title: String) {
         renameNode(id: nodeID, to: title)
+    }
+
+    func canvasView(_ canvas: CanvasView, didReceiveImageDropOf url: URL, atWorldPoint point: CGPoint) -> Bool {
+        createImageNode(contentsOf: url, at: point) != nil
+    }
+
+    func canvasView(_ canvas: CanvasView, nodeID: UUID, didReceiveDropFrom sourceNodeID: UUID) -> Bool {
+        // Only a pi node has an agent to hand the path to, and only an image
+        // node produces one.
+        guard let target = specs[nodeID], target.kind == .pi,
+              let source = specs[sourceNodeID], source.kind == .image,
+              let asset = source.asset,
+              let content = contents[nodeID] else { return false }
+        content.send(text: assetStore.url(for: asset).path + "\n")
+        focusNode(id: nodeID)
+        return true
     }
 
     func canvasView(_ canvas: CanvasView, didFocus nodeID: UUID?) {

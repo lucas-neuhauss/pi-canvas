@@ -37,7 +37,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         self.window = window
 
         controller = CanvasController(canvas: canvas)
-        controller.contentFactory = { spec in TerminalContentFactory.make(spec: spec) }
+        controller.contentFactory = { spec, assetStore in
+            NodeContentFactory.make(spec: spec, assetStore: assetStore)
+        }
 
         mainView.statusBar.onNewTerminal = { [weak self] in self?.controller.newNode(kind: .shell) }
         mainView.statusBar.onNewPi = { [weak self] in self?.controller.newNode(kind: .pi) }

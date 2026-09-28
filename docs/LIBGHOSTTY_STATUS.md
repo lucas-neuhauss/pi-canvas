@@ -1,17 +1,18 @@
 # libghostty migration — status
 
-The canvas was written against a terminal seam (`AgentContent`), so swapping the
-terminal backend is a contained change. This file records where that swap stands
-and what it is waiting on.
+The canvas was written against a content seam (`NodeContent`, with a
+`ProcessContent` refinement for terminals), so swapping the terminal backend is
+a contained change. This file records where that swap stands and what it is
+waiting on.
 
 ## State
 
 | Piece | Status |
 | --- | --- |
-| `AgentContent` seam + backend-agnostic tests | done |
+| `NodeContent`/`ProcessContent` seam + backend-agnostic tests | done |
 | libghostty host (`GhosttyApp`, `GhosttySurfaceView`, `GhosttySurfaceContent`) | written, typechecks with 0 errors against the real header |
 | Build auto-detection (Ghostty when present, SwiftTerm otherwise) | done |
-| Self-test suite (129 checks) | passing on both backends |
+| Self-test suite (296 checks) | passing on both backends |
 | **Building libghostty on this machine** | **blocked: needs Xcode** |
 
 The app currently runs on the **SwiftTerm** backend because libghostty could not
@@ -79,7 +80,7 @@ Implemented in `Sources/PiCanvas/Agent/Ghostty/`:
   `set_content_scale`/`set_focus`/`set_occlusion`, forwards key/mouse/IME input
   (`NSTextInputClient` for marked text), maps mouse shapes to cursors, and
   reports title/pwd/exit/close through its delegate.
-- `GhosttySurfaceContent` — the `AgentContent` conformance: builds the surface
+- `GhosttySurfaceContent` — the `ProcessContent` conformance: builds the surface
   command from `ProcessRequest`, stages scrollback, applies zoom.
 
 Notable mappings:

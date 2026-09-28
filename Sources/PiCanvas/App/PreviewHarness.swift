@@ -41,7 +41,9 @@ enum PreviewHarness {
                 legacyLayoutURL: previewLayout
             )
         )
-        controller.contentFactory = { spec in TerminalContentFactory.make(spec: spec) }
+        controller.contentFactory = { spec, assetStore in
+            NodeContentFactory.make(spec: spec, assetStore: assetStore)
+        }
 
         let projectDirectory = FileManager.default.currentDirectoryPath
         controller.newNode(kind: .shell, workingDirectory: projectDirectory)

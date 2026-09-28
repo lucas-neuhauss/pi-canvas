@@ -11,6 +11,8 @@ protocol NodeFrameViewDelegate: AnyObject {
     func nodeFrameViewDidTakeFirstResponder(_ node: NodeFrameView)
     /// The user finished editing the node's name.
     func nodeFrameView(_ node: NodeFrameView, didRenameTo title: String)
+    /// A node drag was dropped on this node. Returns true when the drop was used.
+    func nodeFrameView(_ node: NodeFrameView, didReceiveDropFrom sourceNodeID: UUID) -> Bool
 }
 
 /// Base sizes for a node's chrome, in screen pixels at 100% zoom. Everything is
@@ -118,6 +120,13 @@ final class NodeFrameView: NSView {
     var kind: NodeKind = .shell {
         didSet { needsDisplay = true }
     }
+    /// When set, resizing keeps this width/height ratio. Images need it; the
+    /// terminals, which can show any proportion, leave it nil.
+    var contentAspectRatio: CGFloat?
+    /// Whether a node drag from another node is currently hovering here.
+    private var isDropTarget = false {
+        didSet { if isDropTarget != oldValue { needsDisplay = true } }
+    }
     /// Which workspace this node belongs to. Hidden nodes still exist and still
     /// run; they are simply not on the canvas you are looking at.
     var workspaceID: UUID?
@@ -199,6 +208,9 @@ final class NodeFrameView: NSView {
         layer?.shadowRadius = 9
         layer?.shadowOffset = .zero
         layer?.backgroundColor = NSColor(srgbRed: 0.106, green: 0.110, blue: 0.125, alpha: 1).cgColor
+        // Drags of the canvas's own private node type: from an image node to a
+        // pi node, which types the asset path into the terminal.
+        registerForDraggedTypes([NodeDragPasteboard.type])
     }
 
     required init?(coder: NSCoder) {
@@ -393,6 +405,10 @@ final class NodeFrameView: NSView {
     /// Applies a drag to the grabbed borders. The opposite borders stay put, so
     /// dragging the left edge moves the origin rather than the whole node.
     private func resized(_ start: CGRect, by delta: CGPoint, edges: ResizeEdge) -> CGRect {
+        if let aspectRatio = contentAspectRatio, aspectRatio > 0 {
+            return aspectLocked(start, delta: delta, edges: edges, aspectRatio: aspectRatio)
+        }
+
         var frame = start
         let minWidth = NodeMetrics.minWorldWidth
         let minHeight = NodeMetrics.minWorldHeight
@@ -414,6 +430,72 @@ final class NodeFrameView: NSView {
             frame.size.height = height
         }
         return frame
+    }
+
+    /// Resizes while keeping a fixed width/height ratio: the dragged axis picks
+    /// the size, the other follows it, and the edge opposite the drag stays put.
+    private func aspectLocked(_ start: CGRect, delta: CGPoint, edges: ResizeEdge, aspectRatio: CGFloat) -> CGRect {
+        let horizontal = edges.contains(.left) || edges.contains(.right)
+        var width: CGFloat
+        var height: CGFloat
+        if horizontal {
+            width = max(start.width + (edges.contains(.left) ? -delta.x : delta.x), NodeMetrics.minWorldWidth)
+            height = width / aspectRatio
+            if height < NodeMetrics.minWorldHeight {
+                height = NodeMetrics.minWorldHeight
+                width = height * aspectRatio
+            }
+        } else {
+            height = max(start.height + (edges.contains(.top) ? -delta.y : delta.y), NodeMetrics.minWorldHeight)
+            width = height * aspectRatio
+            if width < NodeMetrics.minWorldWidth {
+                width = NodeMetrics.minWorldWidth
+                height = width / aspectRatio
+            }
+        }
+        width = width.rounded()
+        height = height.rounded()
+        let originX = edges.contains(.left) ? (start.maxX - width).rounded() : start.minX
+        let originY = edges.contains(.top) ? (start.maxY - height).rounded() : start.minY
+        return CGRect(x: originX, y: originY, width: width, height: height)
+    }
+
+    // MARK: - Node drops
+
+    /// Whether this node would accept a drag from another node. Only a pi node
+    /// does: the drop types the dragged asset's path into its agent, which is
+    /// what makes an image node more than a picture viewer.
+    func canAcceptNodeDrop(_ pasteboard: NSPasteboard) -> Bool {
+        kind == .pi && NodeDragPasteboard.sourceNodeID(from: pasteboard) != nil
+    }
+
+    /// Delivers a node drag to the canvas, which holds both specs and decides
+    /// what the drop means.
+    @discardableResult
+    func acceptNodeDrop(_ pasteboard: NSPasteboard) -> Bool {
+        guard let sourceID = NodeDragPasteboard.sourceNodeID(from: pasteboard) else { return false }
+        return nodeDelegate?.nodeFrameView(self, didReceiveDropFrom: sourceID) ?? false
+    }
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        guard canAcceptNodeDrop(sender.draggingPasteboard) else { return [] }
+        isDropTarget = true
+        return .copy
+    }
+
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        guard canAcceptNodeDrop(sender.draggingPasteboard) else { return [] }
+        isDropTarget = true
+        return .copy
+    }
+
+    override func draggingExited(_ sender: NSDraggingInfo?) {
+        isDropTarget = false
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        isDropTarget = false
+        return acceptNodeDrop(sender.draggingPasteboard)
     }
 
     /// Keeps dragged nodes on a whole world-unit grid so layouts stay tidy.
@@ -505,7 +587,9 @@ final class NodeFrameView: NSView {
         let chrome = chrome
 
         let borderColor: NSColor
-        if isFocused {
+        if isDropTarget {
+            borderColor = NSColor(srgbRed: 0.44, green: 0.84, blue: 0.60, alpha: 1)
+        } else if isFocused {
             borderColor = NSColor(srgbRed: 0.42, green: 0.60, blue: 0.98, alpha: 0.95)
         } else if isSelected {
             borderColor = borderSelected
@@ -519,7 +603,7 @@ final class NodeFrameView: NSView {
             xRadius: chrome.cornerRadius,
             yRadius: chrome.cornerRadius
         )
-        borderPath.lineWidth = 1
+        borderPath.lineWidth = isDropTarget ? 2 : 1
         borderColor.setStroke()
         borderPath.stroke()
 
