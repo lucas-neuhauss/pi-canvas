@@ -1,35 +1,49 @@
 import AppKit
 import Foundation
 
-/// One row in the node switcher.
-struct NodePaletteEntry: Equatable {
+/// One row in a palette: a node, a workspace, or an offer to create one.
+struct PaletteRow: Equatable {
     var id: UUID
-    var kind: NodeKind
-    /// What the node's own title bar shows.
+    /// Primary line.
     var title: String
-    /// Where it runs, abbreviated.
+    /// Secondary line, e.g. a directory or a node count.
     var subtitle: String
-    /// The agent status pill, if any.
+    /// The status pill, if any.
     var status: String?
     var statusKind: NodeStatusKind
-    /// Whether the agent is waiting for a human.
+    /// Whether this row is something that wants attention.
     var isAttention: Bool
-    /// When this node was last focused, for ordering.
+    /// Colour of the small dot, when the rows are nodes.
+    var dotColor: NSColor?
+    /// Extra text the query matches against, e.g. a kind name.
+    var haystackExtra: String
+    /// When this thing was last used, for ordering.
     var lastFocused: Date?
+    /// Set on a row whose purpose is to create something; the caller decides what
+    /// from `title` and `createName`.
+    var createName: String?
+
+    var isCreate: Bool { createName != nil }
 
     /// Everything a query is matched against. Including the status means typing
     /// "need" finds the agents that want you, which is the most useful thing this
     /// list can do.
     var haystack: String {
-        [title, subtitle, status ?? "", kind.displayName].joined(separator: " ")
+        [title, subtitle, status ?? "", haystackExtra].joined(separator: " ")
     }
+}
+
+/// What a palette row refers to.
+enum PaletteSubject: Equatable {
+    case node(UUID)
+    case workspace(UUID)
 }
 
 /// Ordering and filtering for the node switcher.
 ///
 /// Split out from the view because it is the part that decides what you get when
 /// you type, and therefore the part worth testing.
-enum NodePaletteRanking {
+enum PaletteRanking {
 
     /// How well `query` matches `candidate`. Zero means no match.
     ///
@@ -72,7 +86,7 @@ enum NodePaletteRanking {
     ///
     /// With no query: agents that need you, then most recently focused. With a
     /// query: best match first, with the same tiebreaks.
-    static func ranked(_ entries: [NodePaletteEntry], query: String) -> [NodePaletteEntry] {
+    static func ranked(_ entries: [PaletteRow], query: String) -> [PaletteRow] {
         let trimmed = query.trimmingCharacters(in: .whitespaces)
 
         guard !trimmed.isEmpty else {
@@ -83,7 +97,7 @@ enum NodePaletteRanking {
         }
 
         return entries
-            .map { entry -> (entry: NodePaletteEntry, score: Int) in
+            .map { entry -> (entry: PaletteRow, score: Int) in
                 let title = score(trimmed, in: entry.title)
                 let rest = max(
                     score(trimmed, in: entry.subtitle),
@@ -100,7 +114,7 @@ enum NodePaletteRanking {
             .map(\.entry)
     }
 
-    private static func isMoreRecent(_ lhs: NodePaletteEntry, _ rhs: NodePaletteEntry) -> Bool {
+    private static func isMoreRecent(_ lhs: PaletteRow, _ rhs: PaletteRow) -> Bool {
         let left = lhs.lastFocused ?? .distantPast
         let right = rhs.lastFocused ?? .distantPast
         if left != right { return left > right }

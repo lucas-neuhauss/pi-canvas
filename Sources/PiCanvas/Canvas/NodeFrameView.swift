@@ -118,6 +118,9 @@ final class NodeFrameView: NSView {
     var kind: NodeKind = .shell {
         didSet { needsDisplay = true }
     }
+    /// Which workspace this node belongs to. Hidden nodes still exist and still
+    /// run; they are simply not on the canvas you are looking at.
+    var workspaceID: UUID?
     /// Optional status pill, e.g. "needs you" or "exited (1)".
     var statusText: String? {
         didSet { if statusText != oldValue { needsDisplay = true } }

@@ -72,7 +72,12 @@ enum ProcessResolver {
     }
 
     /// A brand new spec for a node of `kind`.
-    static func makeSpec(kind: NodeKind, workingDirectory: String, worldFrame: CGRect) -> NodeSpec {
+    static func makeSpec(
+        kind: NodeKind,
+        workingDirectory: String,
+        worldFrame: CGRect,
+        workspaceID: UUID? = nil
+    ) -> NodeSpec {
         let directory = normalizedDirectory(workingDirectory)
         switch kind {
         case .shell:
@@ -82,7 +87,8 @@ enum ProcessResolver {
                 workingDirectory: directory,
                 // Login shell so the user's PATH and tooling are present.
                 executable: "/bin/zsh",
-                arguments: ["-l"]
+                arguments: ["-l"],
+                workspaceID: workspaceID
             )
         case .pi:
             // Bind the node to its own pi session up front. `--session-id`
@@ -107,7 +113,8 @@ enum ProcessResolver {
                 workingDirectory: directory,
                 executable: "/bin/zsh",
                 arguments: ["-lc", command],
-                sessionID: sessionID
+                sessionID: sessionID,
+                workspaceID: workspaceID
             )
         }
     }

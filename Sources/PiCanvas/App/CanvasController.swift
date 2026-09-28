@@ -8,8 +8,29 @@ final class CanvasController: NSObject {
     static let defaultNodeSize = CGSize(width: 720, height: 440)
 
     let canvas: CanvasView
-    private let store: LayoutStore
+    private let workspaceStore: WorkspaceStore
     private let scrollbackStore: ScrollbackStore
+
+    /// One canvas's worth of metadata. The nodes themselves live in `specs`,
+    /// tagged with the workspace they belong to.
+    private struct WorkspaceRecord {
+        var id: UUID
+        var name: String
+        var createdAt: Date
+        var updatedAt: Date
+        /// Remembered while the workspace is not on screen.
+        var viewport: CanvasViewport
+        var workingDirectory: String
+        var useOrder: Int
+    }
+
+    private var workspaceRecords: [WorkspaceRecord] = []
+    private(set) var activeWorkspaceID: UUID = UUID()
+    /// Nodes whose process has been started, so switching to a workspace starts
+    /// its nodes once and only once.
+    private var startedNodes: Set<UUID> = []
+    /// Incremented every time a workspace is opened; see `WorkspaceFile.useOrder`.
+    private var workspaceUseCounter = 0
 
     private(set) var specs: [UUID: NodeSpec] = [:]
     private var contents: [UUID: AgentContent] = [:]
@@ -49,62 +70,358 @@ final class CanvasController: NSObject {
 
     init(
         canvas: CanvasView,
-        store: LayoutStore = LayoutStore(),
+        workspaceStore: WorkspaceStore = WorkspaceStore(),
         scrollbackStore: ScrollbackStore = ScrollbackStore()
     ) {
         self.canvas = canvas
-        self.store = store
+        self.workspaceStore = workspaceStore
         self.scrollbackStore = scrollbackStore
         super.init()
         canvas.canvasDelegate = self
     }
 
-    var nodeCount: Int { specs.count }
+    var nodeCount: Int {
+        specs.values.filter { $0.workspaceID == activeWorkspaceID || $0.workspaceID == nil }.count
+    }
+
+    /// Name of the workspace on screen.
+    var activeWorkspaceName: String {
+        workspaceRecords.first { $0.id == activeWorkspaceID }?.name ?? "Workspace"
+    }
+
+    var workspaceCount: Int { workspaceRecords.count }
     var zoom: CGFloat { canvas.zoom }
     var focusedNodeID: UUID? { canvas.focusedNodeID }
     var currentWorkingDirectory: String { defaultWorkingDirectory }
 
     // MARK: - Restore / persist
 
-    /// Restores the previous canvas, spawning a fresh process per node.
+    /// Restores every workspace, then puts the most recently used one on screen.
+    ///
+    /// Only the visible workspace's nodes are started: opening the app should not
+    /// spawn the agents from workspaces you are not using.
     func restore() {
-        guard let layout = store.load() else { return }
-        defaultWorkingDirectory = ProcessResolver.normalizedDirectory(layout.lastWorkingDirectory)
+        let files = workspaceStore.loadAll()
+        var adopted: WorkspaceFile?
+        if let legacy = workspaceStore.adoptLegacyLayoutIfNeeded(existing: files) {
+            adopted = legacy
+        }
+
+        var records: [WorkspaceRecord] = []
+        var nodeSpecs: [(workspace: UUID, nodes: [NodeSpec])] = []
+
+        for file in files + [adopted].compactMap({ $0 }) {
+            records.append(WorkspaceRecord(
+                id: file.id,
+                name: file.name,
+                createdAt: file.createdAt,
+                updatedAt: file.updatedAt,
+                viewport: CanvasViewport(
+                    zoom: CGFloat(file.layout.zoom),
+                    panX: CGFloat(file.layout.panX),
+                    panY: CGFloat(file.layout.panY)
+                ),
+                workingDirectory: file.layout.lastWorkingDirectory,
+                useOrder: file.useOrder
+            ))
+            // Tolerate nodes written before workspaces existed.
+            nodeSpecs.append((file.id, file.layout.nodes.map { spec in
+                var spec = spec
+                if spec.workspaceID == nil { spec.workspaceID = file.id }
+                return spec
+            }))
+        }
+
+        if records.isEmpty {
+            records.append(WorkspaceRecord(
+                id: UUID(),
+                name: "Default",
+                createdAt: Date(),
+                updatedAt: Date(),
+                viewport: CanvasViewport(),
+                workingDirectory: ProcessResolver.launchWorkingDirectory,
+                useOrder: 0
+            ))
+        }
+
+        workspaceUseCounter = records.map(\.useOrder).max() ?? 0
+        workspaceRecords = records.sorted { ordering($0, $1) }
+
+        // One snapshot covers every workspace, so switching cannot delete another
+        // workspace's scrollback.
+        let allNodeIDs = nodeSpecs.flatMap { $0.nodes.map(\.id) }
+        scrollbackStore.prune(keeping: Set(allNodeIDs))
+
+        let active = workspaceRecords[0]
+        activeWorkspaceID = active.id
+        defaultWorkingDirectory = ProcessResolver.normalizedDirectory(active.workingDirectory)
         canvas.setViewport(
-            zoom: CGFloat(layout.zoom),
-            pan: CGPoint(x: layout.panX, y: layout.panY),
+            zoom: active.viewport.zoom,
+            pan: CGPoint(x: active.viewport.panX, y: active.viewport.panY),
             notify: false
         )
-        scrollbackStore.prune(keeping: Set(layout.nodes.map(\.id)))
-        for spec in layout.nodes {
-            add(spec: spec, start: true, select: false)
+
+        for group in nodeSpecs {
+            let isActive = group.workspace == activeWorkspaceID
+            for spec in group.nodes {
+                add(spec: spec, start: isActive, select: false)
+            }
         }
-        if let first = layout.nodes.first, let node = canvas.nodeView(withID: first.id) {
-            canvas.select(node, focusContent: false)
+        applyWorkspaceVisibility()
+
+        if let first = canvas.nodeViews.first(where: { $0.workspaceID == activeWorkspaceID }) {
+            canvas.select(first, focusContent: false)
         }
         onStateChange?()
     }
 
-    private func makeLayout() -> LayoutFile {
-        syncSpecsFromNodes()
-        let nodes = canvas.orderedNodeIDs.compactMap { specs[$0] }
-        return LayoutFile(
-            zoom: Double(canvas.zoom),
-            panX: Double(canvas.pan.x),
-            panY: Double(canvas.pan.y),
-            lastWorkingDirectory: defaultWorkingDirectory,
-            nodes: nodes
+    // MARK: - Workspaces
+
+    /// Shows one workspace and hides the rest. Nothing is stopped: the agents in
+    /// other workspaces keep running while you are elsewhere.
+    func activateWorkspace(id: UUID) {
+        guard id != activeWorkspaceID,
+              let record = workspaceRecords.first(where: { $0.id == id }) else { return }
+        captureActiveWorkspaceViewport()
+        installActiveWorkspace(record)
+    }
+
+    /// Newest use first, with the timestamp as a tiebreak for files written
+    /// before the counter existed.
+    private func ordering(_ lhs: WorkspaceRecord, _ rhs: WorkspaceRecord) -> Bool {
+        if lhs.useOrder != rhs.useOrder { return lhs.useOrder > rhs.useOrder }
+        return lhs.updatedAt > rhs.updatedAt
+    }
+
+    private func installActiveWorkspace(_ record: WorkspaceRecord) {
+        activeWorkspaceID = record.id
+        // "Most recently used" has to mean the workspace you moved *to*, not the
+        // one you moved away from, or the switcher's ordering inverts.
+        if let index = workspaceRecords.firstIndex(where: { $0.id == record.id }) {
+            workspaceUseCounter += 1
+            workspaceRecords[index].useOrder = workspaceUseCounter
+            workspaceRecords[index].updatedAt = Date()
+        }
+        defaultWorkingDirectory = ProcessResolver.normalizedDirectory(record.workingDirectory)
+        canvas.setViewport(
+            zoom: record.viewport.zoom,
+            pan: CGPoint(x: record.viewport.panX, y: record.viewport.panY),
+            notify: false
         )
+        applyWorkspaceVisibility()
+        startPendingNodes(in: record.id)
+        persistAll()
+
+        if let first = canvas.nodeViews.first(where: { $0.workspaceID == record.id && !$0.isHidden }) {
+            canvas.select(first, focusContent: true)
+        } else {
+            canvas.select(nil, focusContent: false)
+            canvas.window?.makeFirstResponder(canvas)
+        }
+        onStateChange?()
+    }
+
+    private func captureActiveWorkspaceViewport() {
+        guard let index = workspaceRecords.firstIndex(where: { $0.id == activeWorkspaceID }) else { return }
+        workspaceRecords[index].viewport = canvas.viewport
+        workspaceRecords[index].workingDirectory = defaultWorkingDirectory
+    }
+
+    private func applyWorkspaceVisibility() {
+        for node in canvas.nodeViews {
+            node.isHidden = node.workspaceID != activeWorkspaceID
+        }
+        canvas.layoutNodes()
+    }
+
+    /// Nodes that were never started (because their workspace was not the one in
+    /// use at launch) start the first time that workspace is opened.
+    private func startPendingNodes(in workspaceID: UUID) {
+        for (id, spec) in specs where (spec.workspaceID ?? workspaceID) == workspaceID && !startedNodes.contains(id) {
+            guard let content = contents[id] else { continue }
+            startedNodes.insert(id)
+            let request = ProcessResolver.request(for: spec)
+            NSLog(
+                "[PiCanvas] node %@ start kind=%@ cwd=%@ argv=%@",
+                id.uuidString, spec.kind.rawValue, request.workingDirectory,
+                request.arguments.joined(separator: " ")
+            )
+            content.start(request)
+        }
+    }
+
+    @discardableResult
+    func createWorkspace(named name: String) -> UUID {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let record = WorkspaceRecord(
+            id: UUID(),
+            name: trimmed.isEmpty ? "Workspace \(workspaceRecords.count + 1)" : trimmed,
+            createdAt: Date(),
+            updatedAt: Date(),
+            viewport: CanvasViewport(),
+            workingDirectory: defaultWorkingDirectory,
+            useOrder: 0
+        )
+        captureActiveWorkspaceViewport()
+        workspaceRecords.insert(record, at: 0)
+        installActiveWorkspace(record)
+        return record.id
+    }
+
+    func renameWorkspace(id: UUID, to name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let index = workspaceRecords.firstIndex(where: { $0.id == id }) else { return }
+        workspaceRecords[index].name = trimmed
+        workspaceRecords[index].updatedAt = Date()
+        persistAll()
+        onStateChange?()
+    }
+
+    /// Deleting a workspace closes its nodes, and therefore stops their agents.
+    /// The last workspace cannot be deleted: there is always a canvas.
+    func deleteWorkspace(id: UUID) {
+        guard workspaceRecords.count > 1,
+              workspaceRecords.contains(where: { $0.id == id }) else { return }
+
+        let nodeIDs = canvas.nodeViews.filter { $0.workspaceID == id }.map(\.nodeID)
+        for nodeID in nodeIDs {
+            close(nodeID: nodeID, persisting: false)
+        }
+
+        workspaceRecords.removeAll { $0.id == id }
+        workspaceStore.delete(id: id)
+
+        if activeWorkspaceID == id {
+            activeWorkspaceID = workspaceRecords[0].id
+            installActiveWorkspace(workspaceRecords[0])
+        } else {
+            persistAll()
+            onStateChange?()
+        }
+    }
+
+    var workspaceEntries: [(id: UUID, name: String, nodeCount: Int, needingAttention: Int, isActive: Bool, updatedAt: Date)] {
+        workspaceRecords.map { record in
+            let nodes = specs.values.filter { $0.workspaceID == record.id }
+            let attention = nodes.filter { agentsNeedingAttention.contains($0.id) }.count
+            return (record.id, record.name, nodes.count, attention, record.id == activeWorkspaceID, record.updatedAt)
+        }
+    }
+
+    /// Moves to the next waiting agent, switching workspace if that is where it is.
+    func jumpToNextAgentNeedingAttention() -> UUID? {
+        let candidates = agentsNeedingAttention
+            .filter { canvas.nodeView(withID: $0) != nil }
+            .sorted()
+        guard !candidates.isEmpty else { return nil }
+
+        for id in candidates.reversed() {
+            guard let spec = specs[id], let workspace = spec.workspaceID,
+                  workspace != activeWorkspaceID else { continue }
+            // Prefer an agent that is already on screen; only switch if there is none.
+            if candidates.contains(where: { specs[$0]?.workspaceID == activeWorkspaceID }) { break }
+            if let record = workspaceRecords.first(where: { $0.id == workspace }) {
+                captureActiveWorkspaceViewport()
+                installActiveWorkspace(record)
+            }
+            break
+        }
+
+        guard let target = nextAttentionTarget(from: candidates),
+              let node = canvas.nodeView(withID: target) else { return nil }
+        reveal(node.worldFrame)
+        canvas.select(node, focusContent: true)
+        return target
+    }
+
+    private func nextAttentionTarget(from candidates: [UUID]) -> UUID? {
+        let onScreen = candidates.filter { specs[$0]?.workspaceID == activeWorkspaceID }
+        let ordered = (onScreen.isEmpty ? candidates : onScreen).sorted()
+        guard !ordered.isEmpty else { return nil }
+        if let current = canvas.focusedNodeID, let index = ordered.firstIndex(of: current) {
+            return ordered[(index + 1) % ordered.count]
+        }
+        return ordered[0]
+    }
+
+    // MARK: - Persistence
+
+    /// The active workspace record, creating one if `restore()` never ran. Without
+    /// this a controller that was only constructed would silently persist nothing,
+    /// which is a trap for tests and for any future caller.
+    private func ensureActiveWorkspaceRecord() {
+        guard workspaceRecords.isEmpty else { return }
+        workspaceRecords = [
+            WorkspaceRecord(
+                id: activeWorkspaceID,
+                name: "Default",
+                createdAt: Date(),
+                updatedAt: Date(),
+                viewport: canvas.viewport,
+                workingDirectory: defaultWorkingDirectory,
+                useOrder: {
+                    workspaceUseCounter += 1
+                    return workspaceUseCounter
+                }()
+            )
+        ]
+    }
+
+    /// Saves every workspace. Changes can happen to a workspace that is not on
+    /// screen — an agent exiting closes its node — so this is not limited to the
+    /// visible one.
+    func persistAll() {
+        ensureActiveWorkspaceRecord()
+        syncSpecsFromNodes()
+        for record in workspaceRecords {
+            workspaceStore.scheduleSave(makeWorkspaceFile(record))
+        }
+    }
+
+    private func makeWorkspaceFile(_ record: WorkspaceRecord) -> WorkspaceFile {
+        let isActive = record.id == activeWorkspaceID
+        let viewport = isActive ? canvas.viewport : record.viewport
+        let directory = isActive ? defaultWorkingDirectory : record.workingDirectory
+        let orderedIDs = canvas.orderedNodeIDs
+        let nodes = orderedIDs.compactMap { id -> NodeSpec? in
+            guard let spec = specs[id], (spec.workspaceID ?? record.id) == record.id else { return nil }
+            return spec
+        }
+        return WorkspaceFile(
+            id: record.id,
+            name: record.name,
+            createdAt: record.createdAt,
+            updatedAt: record.updatedAt,
+            useOrder: record.useOrder,
+            layout: LayoutFile(
+                zoom: Double(viewport.zoom),
+                panX: Double(viewport.panX),
+                panY: Double(viewport.panY),
+                lastWorkingDirectory: directory,
+                nodes: nodes
+            )
+        )
+    }
+
+    /// The active workspace as it would be written. Used by tests.
+    func currentWorkspaceFile() -> WorkspaceFile? {
+        guard let record = workspaceRecords.first(where: { $0.id == activeWorkspaceID }) else { return nil }
+        syncSpecsFromNodes()
+        return makeWorkspaceFile(record)
     }
 
     /// Debounced save of the current state.
     func persist() {
-        store.scheduleSave(makeLayout())
+        persistAll()
     }
 
     /// Synchronous save. Used on quit and by the self-test.
     func saveNow() {
-        store.saveNow(makeLayout())
+        ensureActiveWorkspaceRecord()
+        syncSpecsFromNodes()
+        for record in workspaceRecords {
+            workspaceStore.saveNow(makeWorkspaceFile(record))
+        }
     }
 
     private func syncSpecsFromNodes() {
@@ -128,7 +445,8 @@ final class CanvasController: NSObject {
         let spec = ProcessResolver.makeSpec(
             kind: kind,
             workingDirectory: directory,
-            worldFrame: CGRect(origin: origin, size: size)
+            worldFrame: CGRect(origin: origin, size: size),
+            workspaceID: activeWorkspaceID
         )
         add(spec: spec, start: true, select: true)
         reveal(spec.worldFrame)
@@ -186,7 +504,10 @@ final class CanvasController: NSObject {
     }
 
     private func add(spec: NodeSpec, start: Bool, select: Bool) {
+        var spec = spec
+        if spec.workspaceID == nil { spec.workspaceID = activeWorkspaceID }
         let node = NodeFrameView(nodeID: spec.id, worldFrame: spec.worldFrame, kind: spec.kind)
+        node.workspaceID = spec.workspaceID
         node.title = spec.displayTitle
         node.subtitle = Self.abbreviate(spec.workingDirectory)
         specs[spec.id] = spec
@@ -197,6 +518,8 @@ final class CanvasController: NSObject {
         content.setContentScale(canvas.zoom)
         node.contentView = content.view
         canvas.addNodeView(node)
+        // Only the workspace on screen is visible.
+        node.isHidden = spec.workspaceID != activeWorkspaceID
 
         // Give the terminal its real pixel size before anything spawns, so the
         // PTY is created with the right grid instead of 0x0 and catching up.
@@ -211,9 +534,7 @@ final class CanvasController: NSObject {
         }
 
         if start {
-            let request = ProcessResolver.request(for: spec)
-            NSLog("[PiCanvas] node %@ start kind=%@ cwd=%@ argv=%@", spec.id.uuidString, spec.kind.rawValue, request.workingDirectory, request.arguments.joined(separator: " "))
-            content.start(request)
+            startNode(id: spec.id)
         }
         startStatusWatcher(for: spec, node: node)
         if select {
@@ -221,6 +542,20 @@ final class CanvasController: NSObject {
         }
         onStateChange?()
         persist()
+    }
+
+    /// Starts a node's process once, recording that it has been started so a later
+    /// workspace switch does not start it a second time.
+    private func startNode(id: UUID) {
+        guard !startedNodes.contains(id), let spec = specs[id], let content = contents[id] else { return }
+        startedNodes.insert(id)
+        let request = ProcessResolver.request(for: spec)
+        NSLog(
+            "[PiCanvas] node %@ start kind=%@ cwd=%@ argv=%@",
+            id.uuidString, spec.kind.rawValue, request.workingDirectory,
+            request.arguments.joined(separator: " ")
+        )
+        content.start(request)
     }
 
     private func wire(content: AgentContent, node: NodeFrameView) {
@@ -276,20 +611,21 @@ final class CanvasController: NSObject {
         }
     }
 
-    func close(nodeID: UUID) {
+    func close(nodeID: UUID, persisting: Bool = true) {
         guard let node = canvas.nodeView(withID: nodeID) else { return }
         watchers[nodeID]?.stop()
         watchers[nodeID] = nil
         agentsNeedingAttention.removeAll { $0 == nodeID }
         agentUsage[nodeID] = nil
         focusTimes[nodeID] = nil
+        startedNodes.remove(nodeID)
         scrollbackStore.remove(for: nodeID)
         contents[nodeID]?.terminate()
         contents[nodeID] = nil
         canvas.removeNodeView(node)
         specs[nodeID] = nil
         onStateChange?()
-        persist()
+        if persisting { persist() }
     }
 
     /// Closes the focused node. Returns false when nothing was closeable.
@@ -387,43 +723,72 @@ final class CanvasController: NSObject {
         canvas.select(node, focusContent: true)
     }
 
-    /// Everything the node switcher can list.
-    func paletteEntries() -> [NodePaletteEntry] {
-        canvas.orderedNodeIDs.compactMap { id in
-            guard let node = canvas.nodeView(withID: id), let spec = specs[id] else { return nil }
-            return NodePaletteEntry(
+    /// The node switcher's rows: this workspace's nodes only.
+    func paletteEntries() -> [PaletteRow] {
+        canvas.orderedNodeIDs.compactMap { id -> PaletteRow? in
+            guard let node = canvas.nodeView(withID: id), let spec = specs[id],
+                  (spec.workspaceID ?? activeWorkspaceID) == activeWorkspaceID else { return nil }
+            let accent = spec.kind.accent
+            return PaletteRow(
                 id: id,
-                kind: spec.kind,
                 title: node.title,
                 subtitle: Self.abbreviate(spec.workingDirectory),
                 status: node.statusText,
                 statusKind: node.statusKind,
                 isAttention: agentsNeedingAttention.contains(id),
+                dotColor: NSColor(
+                    srgbRed: CGFloat(accent.0),
+                    green: CGFloat(accent.1),
+                    blue: CGFloat(accent.2),
+                    alpha: 1
+                ),
+                haystackExtra: spec.kind.displayName,
                 lastFocused: focusTimes[id]
             )
         }
     }
 
-    // MARK: - Navigation
-
-    /// Cycles to the next agent that wants a human, revealing it if it is
-    /// off-screen. This is the counterpart to the status pill: the canvas tells
-    /// you who needs you, this takes you there.
-    @discardableResult
-    func jumpToNextAgentNeedingAttention() -> UUID? {
-        let candidates = agentsNeedingAttention.filter { canvas.nodeView(withID: $0) != nil }
-        guard !candidates.isEmpty else { return nil }
-
-        let ordered = candidates.sorted()
-        var target = ordered[0]
-        if let current = canvas.focusedNodeID, let index = ordered.firstIndex(of: current) {
-            target = ordered[(index + 1) % ordered.count]
+    /// The workspace switcher's rows: every workspace, plus an offer to make one.
+    func workspacePaletteRows() -> [PaletteRow] {
+        var rows = workspaceRecords.sorted { ordering($0, $1) }.map { record -> PaletteRow in
+            let nodes = specs.values.filter { $0.workspaceID == record.id }
+            let attention = nodes.filter { agentsNeedingAttention.contains($0.id) }.count
+            var subtitle = "\(nodes.count) node\(nodes.count == 1 ? "" : "s")"
+            if let first = nodes.first {
+                subtitle += " · " + Self.abbreviate(first.workingDirectory)
+            }
+            return PaletteRow(
+                id: record.id,
+                title: record.name,
+                subtitle: subtitle,
+                status: attention > 0
+                    ? (attention == 1 ? "needs you" : "\(attention) need you")
+                    : (record.id == activeWorkspaceID ? "current" : nil),
+                statusKind: attention > 0 ? .needsAttention : .idle,
+                isAttention: attention > 0,
+                dotColor: nil,
+                haystackExtra: "workspace",
+                lastFocused: record.updatedAt
+            )
         }
-        if let node = canvas.nodeView(withID: target) {
-            reveal(node.worldFrame)
-            canvas.select(node, focusContent: true)
-        }
-        return target
+        rows.append(PaletteRow(
+            id: UUID(),
+            title: "New workspace…",
+            subtitle: "Start an empty canvas",
+            status: nil,
+            statusKind: .idle,
+            isAttention: false,
+            dotColor: nil,
+            haystackExtra: "workspace new create",
+            lastFocused: nil,
+            createName: ""
+        ))
+        return rows
+    }
+
+    /// Workspaces by most recently used, for the switcher.
+    func orderedWorkspaceRows() -> [PaletteRow] {
+        workspacePaletteRows().filter { !$0.isCreate }
     }
 
     /// Names a node. An empty name clears it, so the terminal's own title shows

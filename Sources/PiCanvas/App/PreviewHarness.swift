@@ -33,7 +33,14 @@ enum PreviewHarness {
             .appendingPathComponent("picanvas-preview-layout.json")
         try? FileManager.default.removeItem(at: previewLayout)
 
-        let controller = CanvasController(canvas: canvas, store: LayoutStore(fileURL: previewLayout))
+        let controller = CanvasController(
+            canvas: canvas,
+            workspaceStore: WorkspaceStore(
+                directory: URL(fileURLWithPath: NSTemporaryDirectory())
+                    .appendingPathComponent("picanvas-preview-ws"),
+                legacyLayoutURL: previewLayout
+            )
+        )
         controller.contentFactory = { spec in TerminalContentFactory.make(spec: spec) }
 
         let projectDirectory = FileManager.default.currentDirectoryPath

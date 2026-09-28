@@ -46,6 +46,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         mainView.statusBar.onZoomReset = { [weak self] in self?.controller.resetZoom() }
         mainView.statusBar.onZoomFit = { [weak self] in self?.controller.zoomToFit() }
         mainView.statusBar.onChooseFolder = { [weak self] in self?.controller.chooseWorkingDirectory() }
+        mainView.statusBar.onSwitchWorkspace = { [weak self] in self?.showWorkspacePalette(nil) }
         controller.onStateChange = { [weak self] in self?.refreshStatus() }
 
         window.makeKeyAndOrderFront(nil)
@@ -98,6 +99,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                 controller.newNode(kind: .pi)
             case "--show-palette":
                 showPalette = true
+            case "--show-workspaces":
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+                    self?.showWorkspacePalette(nil)
+                }
             case "--rename":
                 // Start an inline rename once the terminals have set their titles.
                 DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
@@ -150,7 +155,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             nodeCount: controller.nodeCount,
             zoom: controller.zoom,
             workingDirectory: CanvasController.abbreviate(controller.currentWorkingDirectory),
-            needingAttention: controller.agentsNeedingAttention.count
+            needingAttention: controller.agentsNeedingAttention.count,
+            workspace: controller.activeWorkspaceName
         )
         let count = controller.nodeCount
         var title = count == 0 ? "PiCanvas" : "PiCanvas — \(count) node\(count == 1 ? "" : "s")"
@@ -200,13 +206,107 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             return
         }
 
-        mainView.palette.onSelect = { [weak self] id in
-            self?.controller.focusNode(id: id)
-        }
         mainView.palette.onDismiss = { [weak self] in
             self?.restoreTerminalFocus()
         }
-        mainView.palette.present(entries: controller.paletteEntries(), from: window)
+        mainView.palette.onSelectRow = { [weak self] row in
+            guard !row.isCreate else { return }
+            self?.controller.focusNode(id: row.id)
+        }
+        mainView.palette.onDeleteRow = nil
+        mainView.palette.onRenameRow = nil
+        mainView.palette.onSubmitText = nil
+        mainView.palette.presentList(
+            rows: controller.paletteEntries(),
+            title: "↑↓ move · ⇥ next · ↵ go · esc close",
+            placeholder: "Go to terminal…",
+            allowsCreate: false,
+            from: window
+        )
+    }
+
+    /// ⌘⇧K: switch, create, rename and delete workspaces.
+    @objc private func showWorkspacePalette(_ sender: Any?) {
+        if mainView.palette.isPresenting {
+            mainView.palette.dismiss()
+            return
+        }
+
+        mainView.palette.onDismiss = { [weak self] in
+            self?.restoreTerminalFocus()
+        }
+        mainView.palette.onSelectRow = { [weak self] row in
+            guard let self else { return }
+            if row.isCreate {
+                // A row with no name asks for one; "Create “x”" already has it.
+                if let name = row.createName, !name.isEmpty {
+                    self.controller.createWorkspace(named: name)
+                } else {
+                    self.promptForWorkspaceName(
+                        title: "Name the new workspace",
+                        initial: ""
+                    ) { name in
+                        self.controller.createWorkspace(named: name)
+                    }
+                }
+                return
+            }
+            self.controller.activateWorkspace(id: row.id)
+        }
+        mainView.palette.onRenameRow = { [weak self] row in
+            guard let self else { return }
+            self.promptForWorkspaceName(title: "Rename workspace", initial: row.title) { name in
+                self.controller.renameWorkspace(id: row.id, to: name)
+            }
+        }
+        mainView.palette.onDeleteRow = { [weak self] row in
+            self?.confirmDeleteWorkspace(row)
+        }
+        mainView.palette.onSubmitText = nil
+        mainView.palette.presentList(
+            rows: controller.workspacePaletteRows(),
+            title: "↑↓ move · ↵ switch · F2 rename · ⌫ delete · esc close",
+            placeholder: "Switch workspace…",
+            allowsCreate: true,
+            from: window
+        )
+    }
+
+    private func promptForWorkspaceName(title: String, initial: String, then commit: @escaping (String) -> Void) {
+        mainView.palette.onDismiss = { [weak self] in
+            self?.restoreTerminalFocus()
+        }
+        mainView.palette.onSubmitText = { name in commit(name) }
+        mainView.palette.presentPrompt(
+            title: "\(title) — return to confirm, esc to cancel",
+            placeholder: "Workspace name",
+            initialText: initial,
+            from: window
+        )
+    }
+
+    private func confirmDeleteWorkspace(_ row: PaletteRow) {
+        let alert = NSAlert()
+        alert.messageText = "Delete “\(row.title)”?"
+        alert.informativeText = "Its terminals and agents are closed. Other workspaces are unaffected."
+        alert.addButton(withTitle: "Delete")
+        alert.addButton(withTitle: "Cancel")
+        alert.alertStyle = .warning
+        if alert.runModal() == .alertFirstButtonReturn {
+            controller.deleteWorkspace(id: row.id)
+        }
+    }
+
+    @objc private func nextWorkspace(_ sender: Any?) { cycleWorkspace(by: 1) }
+    @objc private func previousWorkspace(_ sender: Any?) { cycleWorkspace(by: -1) }
+
+    private func cycleWorkspace(by offset: Int) {
+        let rows = controller.orderedWorkspaceRows()
+        guard rows.count > 1 else { return }
+        let current = rows.firstIndex { $0.id == controller.activeWorkspaceID } ?? 0
+        let next = (current + offset + rows.count) % rows.count
+        controller.activateWorkspace(id: rows[next].id)
+        refreshStatus()
     }
 
     /// Handing focus back matters: opening the switcher took it from the terminal.
@@ -228,6 +328,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             return !(controller?.agentsNeedingAttention.isEmpty ?? true)
         case #selector(showTerminalPalette(_:)):
             return (controller?.nodeCount ?? 0) > 0
+        case #selector(showWorkspacePalette(_:)), #selector(nextWorkspace(_:)), #selector(previousWorkspace(_:)):
+            return (controller?.workspaceCount ?? 0) > 0
         case #selector(renameNode(_:)):
             return controller?.focusedNodeID != nil
         default:
@@ -368,6 +470,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         )
         goToItem.target = self
         viewMenu.addItem(goToItem)
+
+        let workspacesItem = NSMenuItem(
+            title: "Workspaces…",
+            action: #selector(showWorkspacePalette(_:)),
+            keyEquivalent: "k"
+        )
+        workspacesItem.keyEquivalentModifierMask = [.command, .shift]
+        workspacesItem.target = self
+        viewMenu.addItem(workspacesItem)
+
+        let nextWorkspaceItem = NSMenuItem(
+            title: "Next Workspace",
+            action: #selector(nextWorkspace(_:)),
+            keyEquivalent: "\t"
+        )
+        nextWorkspaceItem.keyEquivalentModifierMask = [.control]
+        nextWorkspaceItem.target = self
+        viewMenu.addItem(nextWorkspaceItem)
+
+        let previousWorkspaceItem = NSMenuItem(
+            title: "Previous Workspace",
+            action: #selector(previousWorkspace(_:)),
+            keyEquivalent: "\t"
+        )
+        previousWorkspaceItem.keyEquivalentModifierMask = [.control, .shift]
+        previousWorkspaceItem.target = self
+        viewMenu.addItem(previousWorkspaceItem)
 
         viewMenu.addItem(.separator())
 

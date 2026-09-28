@@ -55,6 +55,25 @@ What maps where:
 | ligatures, `font-thicken` | yes | **no** — SwiftTerm has no equivalent |
 | keybinds, shell integration | yes | no (not applicable) |
 
+## Workspaces
+
+A workspace is a named canvas: its own nodes, its own viewport, its own working
+directory. `⌘⇧K` lists them; `↵` switches, typing a name offers to create one,
+`F2` renames, `⌫` deletes. `⌃⇥` cycles. The current workspace is named in the
+status bar, and clicking that name opens the list.
+
+What makes them more than saved layouts: **switching stops nothing.** Agents in
+the workspace you leave keep running — same process, same session, still
+reporting status. An agent that starts needing you is counted in the status bar
+from wherever you are, and `⌘J` will switch to the workspace it is in and take you
+there. Nodes in workspaces you have not opened yet are *not* started at all, so
+several workspaces cost nothing until you visit them.
+
+Storage is one file per workspace under
+`~/Library/Application Support/PiCanvas/workspaces/`. A canvas written by an
+earlier version (`layout.json`) is adopted as a workspace named `Default`, and the
+old file is left in place so an older build still opens it.
+
 ## Ending a node
 
 What happens when a process exits depends on how it exited:
@@ -80,6 +99,8 @@ and leaving that terminal closes the node.
 | `⌘+` / `⌘-` / `⌘0` | Zoom in / out / actual size |
 | `⌘9` | Zoom to fit every node |
 | `⌘K` | Go to terminal… — the node switcher |
+| `⌘⇧K` | Workspaces… — switch, create, rename, delete |
+| `⌃⇥` / `⌃⇧⇥` | Next / previous workspace |
 | `F2` | Rename the focused node (or double-click its title bar) |
 | `⌘J` | Jump to the next agent that needs you (pans to it if off-screen) |
 | `Delete` | Close the selected node (when the canvas, not a terminal, has focus) |
@@ -239,8 +260,9 @@ to iterate on and has no external moving parts.
 ## Testing
 
 ```sh
-# 212 checks: coordinate maths, zoom anchoring, drag, resize from every border,
-# delete, renaming, persistence round-trip, process launch, session binding, exit
+# 249 checks: coordinate maths, zoom anchoring, drag, resize from every border,
+# delete, renaming, workspaces (migration, keep-alive, lazy start, per-workspace
+# viewports, CRUD), persistence round-trip, process launch, session binding, exit
 # behaviour, scroll and zoom-scroll routing, key repeat, switcher ranking, the
 # agent status state machine, the needs-you indicator and jump, scrollback
 # snapshot/restore, zoom-vs-resize behaviour, Ghostty config parsing, and three
@@ -253,9 +275,10 @@ to iterate on and has no external moving parts.
 # Screenshot just the app window (needs Screen Recording permission)
 ./scripts/window-shot.sh /tmp/window.png
 
-# Launch with nodes already open, with the switcher showing, or mid-rename
+# Launch with nodes already open, with a palette showing, or mid-rename
 ./build/PiCanvas.app/Contents/MacOS/PiCanvas --new-terminal --new-pi
 ./build/PiCanvas.app/Contents/MacOS/PiCanvas --show-palette --palette-query=need
+./build/PiCanvas.app/Contents/MacOS/PiCanvas --show-workspaces
 ./build/PiCanvas.app/Contents/MacOS/PiCanvas --new-pi --rename
 ```
 
@@ -317,5 +340,6 @@ PiCanvas is force-quit, the child processes die with the pty.
 
 - Cost and token history over time (the transcript already carries `usage`; only
   the current totals are shown)
-- Node connections, drag-to-snap, minimap, multi-select, saved workspaces
+- Node kinds other than terminals: images, text labels, notes, a browser
+- Node connections, drag-to-snap, a minimap
 - A first-run welcome state instead of an empty canvas
