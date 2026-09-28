@@ -36,6 +36,10 @@ final class StatusBarView: NSView {
     let pathLabel = NSTextField(labelWithString: "")
     let zoomLabel = NSTextField(labelWithString: "100%")
 
+    /// Shows which workspace is on screen, and opens the switcher when clicked.
+    let workspaceButton = ClosureButton(title: "Workspace", tooltip: "Switch workspace (⌘⇧K)")
+    var onSwitchWorkspace: (() -> Void)?
+
     var onNewTerminal: (() -> Void)?
     var onNewPi: (() -> Void)?
     var onZoomIn: (() -> Void)?
@@ -74,6 +78,8 @@ final class StatusBarView: NSView {
         styleLabel(pathLabel, size: 11, weight: .regular, color: NSColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.42))
         styleLabel(zoomLabel, size: 11, weight: .medium, color: NSColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.72), monospaced: true)
 
+        workspaceButton.onAction = { [weak self] in self?.onSwitchWorkspace?() }
+
         let folderButton = ClosureButton(title: "Folder", tooltip: "Choose the folder new nodes start in") { [weak self] in
             self?.onChooseFolder?()
         }
@@ -102,7 +108,7 @@ final class StatusBarView: NSView {
             self?.onNewPi?()
         }
 
-        let leftStack = NSStackView(views: [statusLabel, pathLabel])
+        let leftStack = NSStackView(views: [workspaceButton, statusLabel, pathLabel])
         leftStack.orientation = .horizontal
         leftStack.spacing = 12
         leftStack.alignment = .centerY
@@ -141,7 +147,10 @@ final class StatusBarView: NSView {
         NSRect(x: 0, y: 0, width: bounds.width, height: 1).fill()
     }
 
-    func update(nodeCount: Int, zoom: CGFloat, workingDirectory: String, needingAttention: Int = 0) {
+    func update(nodeCount: Int, zoom: CGFloat, workingDirectory: String, needingAttention: Int = 0, workspace: String? = nil) {
+        if let workspace {
+            workspaceButton.title = workspace
+        }
         if needingAttention > 0 {
             statusLabel.stringValue = needingAttention == 1
                 ? "1 agent needs you — ⌘J"
@@ -170,7 +179,7 @@ final class MainView: NSView {
     let canvas: CanvasView
     let statusBar = StatusBarView()
     /// The node switcher, shown over everything else.
-    let palette = NodePaletteView()
+    let palette = PaletteView()
 
     override var isFlipped: Bool { true }
 

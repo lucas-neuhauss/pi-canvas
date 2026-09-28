@@ -148,9 +148,10 @@ final class CanvasView: NSView {
         if notify { canvasDelegate?.canvasView(self, didChangeViewport: viewport) }
     }
 
-    /// Fits every node on screen with a comfortable margin.
+    /// Fits every visible node on screen with a comfortable margin.
     func zoomToFit() {
-        guard !nodeViews.isEmpty else {
+        let visible = visibleNodeViews
+        guard !visible.isEmpty else {
             zoom = 1
             pan = .zero
             layoutNodes()
@@ -158,8 +159,8 @@ final class CanvasView: NSView {
             return
         }
 
-        var worldBounds = nodeViews[0].worldFrame
-        for node in nodeViews.dropFirst() {
+        var worldBounds = visible[0].worldFrame
+        for node in visible.dropFirst() {
             worldBounds = worldBounds.union(node.worldFrame)
         }
 
@@ -250,6 +251,16 @@ final class CanvasView: NSView {
         if focusContent || focusChanged {
             canvasDelegate?.canvasView(self, didFocus: node.nodeID)
         }
+    }
+
+    /// Nodes that are actually on screen. Hidden ones belong to another workspace.
+    var visibleNodeViews: [NodeFrameView] {
+        nodeViews.filter { !$0.isHidden }
+    }
+
+    /// The visible node under a point, if any.
+    func node(at canvasPoint: CGPoint) -> NodeFrameView? {
+        visibleNodeViews.last { $0.frame.contains(canvasPoint) }
     }
 
     /// Recomputes every node's screen frame. Called after any zoom/pan/frame change.
@@ -475,7 +486,7 @@ final class CanvasView: NSView {
     /// pointer scrolls its own history, which is almost never what you meant.
     /// With nothing focused, no terminal is affected at all.
     func terminalHandlesScroll(at canvasPoint: CGPoint) -> Bool {
-        guard let node = nodeViews.last(where: { $0.frame.contains(canvasPoint) }) else { return false }
+        guard let node = node(at: canvasPoint) else { return false }
         return node.nodeID == focusedNodeID
     }
 
@@ -483,7 +494,7 @@ final class CanvasView: NSView {
         let canvasPoint = convert(point, from: nil)
         // Status-bar clicks convert to canvas coordinates too; ignore them.
         guard bounds.contains(canvasPoint) else { return }
-        guard let node = nodeViews.last(where: { $0.frame.contains(canvasPoint) }) else { return }
+        guard let node = node(at: canvasPoint) else { return }
         select(node, focusContent: false)
     }
 }

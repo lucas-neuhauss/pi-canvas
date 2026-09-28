@@ -36,6 +36,11 @@ struct NodeSpec: Codable, Identifiable, Equatable {
     /// Resolved executable + argv. Stored so relaunch is deterministic.
     var executable: String
     var arguments: [String]
+    /// Which workspace this node belongs to. Optional because layouts written
+    /// before workspaces existed have no such field; those are adopted into the
+    /// default workspace when they are loaded.
+    var workspaceID: UUID?
+
     /// Last title the terminal reported, restored so the canvas looks the same
     /// before the new process has had a chance to set one.
     var title: String?
@@ -56,7 +61,8 @@ struct NodeSpec: Codable, Identifiable, Equatable {
         arguments: [String],
         title: String? = nil,
         customTitle: String? = nil,
-        sessionID: String? = nil
+        sessionID: String? = nil,
+        workspaceID: UUID? = nil
     ) {
         self.id = id
         self.kind = kind
@@ -70,6 +76,7 @@ struct NodeSpec: Codable, Identifiable, Equatable {
         self.title = title
         self.customTitle = customTitle
         self.sessionID = sessionID
+        self.workspaceID = workspaceID
     }
 
     /// What the node should show: your name if you gave it one, else whatever the
@@ -113,5 +120,64 @@ struct LayoutFile: Codable {
         self.panY = panY
         self.lastWorkingDirectory = lastWorkingDirectory
         self.nodes = nodes
+    }
+
+    /// Tolerant decoding: a layout written by an older build is missing fields we
+    /// have since added, and losing a canvas to a decode failure is not acceptable.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        version = try container.decodeIfPresent(Int.self, forKey: .version) ?? LayoutFile.currentVersion
+        zoom = try container.decodeIfPresent(Double.self, forKey: .zoom) ?? 1
+        panX = try container.decodeIfPresent(Double.self, forKey: .panX) ?? 0
+        panY = try container.decodeIfPresent(Double.self, forKey: .panY) ?? 0
+        lastWorkingDirectory = try container.decodeIfPresent(String.self, forKey: .lastWorkingDirectory)
+            ?? NSHomeDirectory()
+        nodes = try container.decodeIfPresent([NodeSpec].self, forKey: .nodes) ?? []
+    }
+}
+
+/// One named canvas. Switching workspaces swaps which set of nodes is on screen
+/// without stopping anything: the agents in the other ones keep running.
+struct WorkspaceFile: Codable {
+    static let currentVersion = 1
+
+    var version: Int = WorkspaceFile.currentVersion
+    var id: UUID
+    var name: String
+    var createdAt: Date
+    var updatedAt: Date
+    /// Monotonic counter of the last time this workspace was opened.
+    ///
+    /// Wall-clock timestamps cannot order two workspaces switched between within
+    /// the same millisecond, which is exactly what cycling through them does, so
+    /// the ordering is kept on its own counter.
+    var useOrder: Int = 0
+    var layout: LayoutFile
+
+    init(
+        id: UUID = UUID(),
+        name: String,
+        createdAt: Date = Date(),
+        updatedAt: Date = Date(),
+        useOrder: Int = 0,
+        layout: LayoutFile
+    ) {
+        self.id = id
+        self.name = name
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+        self.useOrder = useOrder
+        self.layout = layout
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        version = try container.decodeIfPresent(Int.self, forKey: .version) ?? WorkspaceFile.currentVersion
+        id = try container.decode(UUID.self, forKey: .id)
+        name = try container.decode(String.self, forKey: .name)
+        createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
+        updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()
+        useOrder = try container.decodeIfPresent(Int.self, forKey: .useOrder) ?? 0
+        layout = try container.decode(LayoutFile.self, forKey: .layout)
     }
 }

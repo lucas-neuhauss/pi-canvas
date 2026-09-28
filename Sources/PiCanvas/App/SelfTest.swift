@@ -123,7 +123,7 @@ enum SelfTest {
             .appendingPathComponent("picanvas-selftest-layout.json")
         try? FileManager.default.removeItem(at: layoutURL)
 
-        let controller = CanvasController(canvas: canvas, store: LayoutStore(fileURL: layoutURL))
+        let controller = CanvasController(canvas: canvas, workspaceStore: WorkspaceStore(directory: URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("picanvas-ws-\(UUID().uuidString)"), legacyLayoutURL: layoutURL))
         let recorder = ContentRecorder()
         controller.contentFactory = { spec in recorder.make(spec) }
 
@@ -133,7 +133,7 @@ enum SelfTest {
         testResize(canvas: canvas, controller: controller, checker: checker)
         testProcessRequest(controller: controller, recorder: recorder, checker: checker)
         testDelete(canvas: canvas, controller: controller, recorder: recorder, checker: checker)
-        testPersistence(canvas: canvas, controller: controller, layoutURL: layoutURL, checker: checker)
+        testPersistence(checker: checker)
         testZOrder(canvas: canvas, controller: controller, checker: checker)
         testPiSessionBinding(checker: checker)
         testAgentStatusWatcher(checker: checker)
@@ -145,6 +145,7 @@ enum SelfTest {
         testKeyRepeat(checker: checker)
         testNodePalette(checker: checker)
         testRenaming(checker: checker)
+        testWorkspaces(checker: checker)
         testScrollbackPersistence(checker: checker)
         testTerminalRoundTrip(checker: checker)
         testResizeReflow(checker: checker)
@@ -337,48 +338,72 @@ enum SelfTest {
         checker.equal(controller.nodeCount, countBefore - 1, "closing a missing node is a no-op")
     }
 
-    private static func testPersistence(
-        canvas: CanvasView,
-        controller: CanvasController,
-        layoutURL: URL,
-        checker: Checker
-    ) {
+    /// Persistence now has two layers: a workspace file holds a canvas, and the
+    /// legacy single-canvas file is adopted as the first workspace.
+    private static func testPersistence(checker: Checker) {
         print("\npersistence")
+
+        let canvasFrame = CGRect(x: 0, y: 0, width: 1200, height: 800)
+        let canvas = CanvasView(frame: canvasFrame)
+        let window = NSWindow(
+            contentRect: canvasFrame,
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = canvas
+        window.makeKeyAndOrderFront(nil)
+
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("picanvas-persist-\(UUID().uuidString)")
+        let legacyURL = directory.appendingPathComponent("layout.json")
+        let store = WorkspaceStore(directory: directory, legacyLayoutURL: legacyURL)
+        let controller = CanvasController(canvas: canvas, workspaceStore: store)
+        controller.contentFactory = { _ in RecordingContent() }
+
+        controller.newNode(kind: .shell)
         guard let node = canvas.nodeViews.first else {
             checker.check(false, "node available to persist")
+            window.close()
             return
         }
         node.worldFrame = CGRect(x: 42, y: -17, width: 512, height: 300)
         canvas.layoutNodes()
-        controller.persist()
         controller.saveNow()
 
-        let reloaded = LayoutStore(fileURL: layoutURL).load()
-        checker.check(reloaded != nil, "layout file readable")
-        guard let layout = reloaded else { return }
+        let reloaded = store.loadAll()
+        checker.equal(reloaded.count, 1, "one workspace file is written")
+        guard let layout = reloaded.first?.layout else {
+            checker.check(false, "workspace file readable")
+            window.close()
+            return
+        }
         checker.equal(layout.nodes.count, controller.nodeCount, "node count persisted")
         checker.close(CGFloat(layout.zoom), canvas.zoom, 0.001, "zoom persisted")
 
         guard let persisted = layout.nodes.first(where: { $0.id == node.nodeID }) else {
-            checker.check(false, "node found in persisted layout")
+            checker.check(false, "node found in the persisted workspace")
+            window.close()
             return
         }
         checker.close(CGFloat(persisted.x), 42, 0.001, "x persisted")
         checker.close(CGFloat(persisted.y), -17, 0.001, "y persisted")
         checker.close(CGFloat(persisted.width), 512, 0.001, "width persisted")
         checker.close(CGFloat(persisted.height), 300, 0.001, "height persisted")
+        checker.equal(persisted.workspaceID, reloaded.first?.id, "the node remembers its workspace")
 
-        // Restoring into a fresh canvas must reproduce the layout.
-        let canvas2 = CanvasView(frame: CGRect(x: 0, y: 0, width: 1200, height: 800))
-        let window2 = NSWindow(contentRect: canvas2.frame, styleMask: [.titled], backing: .buffered, defer: false)
+        // Restoring into a fresh canvas must reproduce the canvas.
+        let canvas2 = CanvasView(frame: canvasFrame)
+        let window2 = NSWindow(contentRect: canvasFrame, styleMask: [.titled], backing: .buffered, defer: false)
         window2.contentView = canvas2
         window2.makeKeyAndOrderFront(nil)
 
-        let controller2 = CanvasController(canvas: canvas2, store: LayoutStore(fileURL: layoutURL))
+        let controller2 = CanvasController(canvas: canvas2, workspaceStore: store)
         controller2.contentFactory = { _ in RecordingContent() }
         controller2.restore()
 
         checker.equal(controller2.nodeCount, layout.nodes.count, "restore recreates every node")
+        checker.equal(controller2.workspaceCount, 1, "restore brings back the workspace")
         if let restored = canvas2.nodeView(withID: node.nodeID) {
             checker.close(restored.worldFrame.origin.x, 42, 0.001, "restored x")
             checker.close(restored.worldFrame.size.width, 512, 0.001, "restored width")
@@ -386,6 +411,8 @@ enum SelfTest {
             checker.check(false, "restored node exists")
         }
         window2.close()
+        window.close()
+        try? FileManager.default.removeItem(at: directory)
     }
 
     private static func testZOrder(canvas: CanvasView, controller: CanvasController, checker: Checker) {
@@ -748,7 +775,7 @@ enum SelfTest {
 
         let layoutURL = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("picanvas-zoomscroll-\(UUID().uuidString).json")
-        let controller = CanvasController(canvas: canvas, store: LayoutStore(fileURL: layoutURL))
+        let controller = CanvasController(canvas: canvas, workspaceStore: WorkspaceStore(directory: URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("picanvas-ws-\(UUID().uuidString)"), legacyLayoutURL: layoutURL))
         controller.contentFactory = { _ in RecordingContent() }
 
         controller.newNode(kind: .shell)
@@ -796,15 +823,15 @@ enum SelfTest {
 
         // Matching quality
         checker.check(
-            NodePaletteRanking.score("pi", in: "pi - canvas") > NodePaletteRanking.score("pi", in: "canvas pi"),
+            PaletteRanking.score("pi", in: "pi - canvas") > PaletteRanking.score("pi", in: "canvas pi"),
             "an earlier match scores higher"
         )
-        checker.equal(NodePaletteRanking.score("zzz", in: "pi - canvas"), 0, "a miss scores zero")
-        checker.check(NodePaletteRanking.score("pcn", in: "pi-canvas") > 0, "subsequences match, so initials work")
-        checker.check(NodePaletteRanking.score("canvas", in: "~/Projects/pi-canvas") > 0, "paths are searchable")
-        checker.check(NodePaletteRanking.score("", in: "anything") > 0, "an empty query matches everything")
+        checker.equal(PaletteRanking.score("zzz", in: "pi - canvas"), 0, "a miss scores zero")
+        checker.check(PaletteRanking.score("pcn", in: "pi-canvas") > 0, "subsequences match, so initials work")
+        checker.check(PaletteRanking.score("canvas", in: "~/Projects/pi-canvas") > 0, "paths are searchable")
+        checker.check(PaletteRanking.score("", in: "anything") > 0, "an empty query matches everything")
         checker.check(
-            NodePaletteRanking.score("canvas", in: "canvas") > NodePaletteRanking.score("canvas", in: "pi - canvas"),
+            PaletteRanking.score("canvas", in: "canvas") > PaletteRanking.score("canvas", in: "pi - canvas"),
             "an exact match beats a substring"
         )
 
@@ -813,44 +840,46 @@ enum SelfTest {
         let recent = UUID()
         let stale = UUID()
         let entries = [
-            NodePaletteEntry(
-                id: stale, kind: .shell, title: "Terminal", subtitle: "~/work",
-                status: nil, statusKind: .idle, isAttention: false, lastFocused: nil
+            PaletteRow(
+                id: stale, title: "Terminal", subtitle: "~/work", status: nil,
+                statusKind: .idle, isAttention: false, dotColor: nil,
+                haystackExtra: "Terminal", lastFocused: nil
             ),
-            NodePaletteEntry(
-                id: waiting, kind: .pi, title: "π - canvas", subtitle: "~/Projects/pi-canvas",
+            PaletteRow(
+                id: waiting, title: "π - canvas", subtitle: "~/Projects/pi-canvas",
                 status: "needs you", statusKind: .needsAttention, isAttention: true,
+                dotColor: nil, haystackExtra: "pi",
                 lastFocused: Date(timeIntervalSince1970: 100)
             ),
-            NodePaletteEntry(
-                id: recent, kind: .shell, title: "zsh", subtitle: "~/tmp",
-                status: nil, statusKind: .idle, isAttention: false,
-                lastFocused: Date(timeIntervalSince1970: 500)
+            PaletteRow(
+                id: recent, title: "zsh", subtitle: "~/tmp", status: nil,
+                statusKind: .idle, isAttention: false, dotColor: nil,
+                haystackExtra: "Terminal", lastFocused: Date(timeIntervalSince1970: 500)
             )
         ]
 
         checker.equal(
-            NodePaletteRanking.ranked(entries, query: "").map(\.id),
+            PaletteRanking.ranked(entries, query: "").map(\.id),
             [waiting, recent, stale],
             "unqueried: agents that need you, then most recently focused"
         )
         checker.equal(
-            NodePaletteRanking.ranked(entries, query: "need").first?.id,
+            PaletteRanking.ranked(entries, query: "need").first?.id,
             waiting,
             "typing a status finds the waiting agent"
         )
         checker.equal(
-            NodePaletteRanking.ranked(entries, query: "tmp").first?.id,
+            PaletteRanking.ranked(entries, query: "tmp").first?.id,
             recent,
             "the working directory is searchable"
         )
-        checker.equal(NodePaletteRanking.ranked(entries, query: "zzz").count, 0, "a query with no match shows nothing")
+        checker.equal(PaletteRanking.ranked(entries, query: "zzz").count, 0, "a query with no match shows nothing")
 
         // The digit shortcut
-        checker.equal(NodePaletteRanking.indexForDigit("2", count: 3), 1, "a digit picks a row by position")
-        checker.check(NodePaletteRanking.indexForDigit("9", count: 3) == nil, "a digit past the end picks nothing")
-        checker.check(NodePaletteRanking.indexForDigit("0", count: 3) == nil, "there is no zeroth row")
-        checker.check(NodePaletteRanking.indexForDigit("ab", count: 3) == nil, "text is not a digit")
+        checker.equal(PaletteRanking.indexForDigit("2", count: 3), 1, "a digit picks a row by position")
+        checker.check(PaletteRanking.indexForDigit("9", count: 3) == nil, "a digit past the end picks nothing")
+        checker.check(PaletteRanking.indexForDigit("0", count: 3) == nil, "there is no zeroth row")
+        checker.check(PaletteRanking.indexForDigit("ab", count: 3) == nil, "text is not a digit")
 
         // What the controller actually lists
         let canvas = CanvasView(frame: CGRect(x: 0, y: 0, width: 1200, height: 800))
@@ -865,7 +894,7 @@ enum SelfTest {
 
         let layoutURL = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("picanvas-palette-\(UUID().uuidString).json")
-        let controller = CanvasController(canvas: canvas, store: LayoutStore(fileURL: layoutURL))
+        let controller = CanvasController(canvas: canvas, workspaceStore: WorkspaceStore(directory: URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("picanvas-ws-\(UUID().uuidString)"), legacyLayoutURL: layoutURL))
         controller.contentFactory = { _ in RecordingContent() }
         controller.newNode(kind: .shell)
         controller.newNode(kind: .pi)
@@ -874,8 +903,8 @@ enum SelfTest {
         checker.equal(listed.count, 2, "every node is listed")
         checker.check(listed.allSatisfy { !$0.title.isEmpty }, "every row has a title")
         checker.check(listed.allSatisfy { !$0.subtitle.isEmpty }, "every row says where it runs")
-        checker.check(listed.contains { $0.kind == .pi }, "agents are listed alongside terminals")
-        checker.check(listed.contains { $0.kind == .shell }, "terminals are listed too")
+        checker.check(listed.contains { $0.haystackExtra == "pi" }, "agents are listed alongside terminals")
+        checker.check(listed.contains { $0.haystackExtra == "Terminal" }, "terminals are listed too")
 
         canvas.select(nil, focusContent: false)
         guard let target = canvas.nodeViews.first else {
@@ -971,8 +1000,12 @@ enum SelfTest {
 
         let layoutURL = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("picanvas-rename-\(UUID().uuidString).json")
-        let store = LayoutStore(fileURL: layoutURL)
-        let controller = CanvasController(canvas: canvas, store: store)
+        let store = WorkspaceStore(
+            directory: URL(fileURLWithPath: NSTemporaryDirectory())
+                .appendingPathComponent("picanvas-rename-ws-\(UUID().uuidString)"),
+            legacyLayoutURL: layoutURL
+        )
+        let controller = CanvasController(canvas: canvas, workspaceStore: store)
         let recorder = ContentRecorder()
         controller.contentFactory = { spec in recorder.make(spec) }
 
@@ -996,7 +1029,7 @@ enum SelfTest {
 
         controller.saveNow()
         checker.equal(
-            store.load()?.nodes.first?.customTitle,
+            store.loadAll().first?.layout.nodes.first?.customTitle,
             "auth refactor",
             "the name is persisted"
         )
@@ -1017,12 +1050,182 @@ enum SelfTest {
             "the switcher lists the name you gave"
         )
         checker.equal(
-            NodePaletteRanking.ranked(controller.paletteEntries(), query: "auth").count,
+            PaletteRanking.ranked(controller.paletteEntries(), query: "auth").count,
             1,
             "and can be found by typing it"
         )
 
         window.close()
+    }
+
+    /// Workspaces are the organisational layer, so the tests are about what
+    /// survives a switch: running agents, their node views, and each canvas's own
+    /// viewport.
+    private static func testWorkspaces(checker: Checker) {
+        print("\nworkspaces")
+
+        let canvasFrame = CGRect(x: 0, y: 0, width: 1400, height: 800)
+        func makeCanvas() -> (CanvasView, NSWindow) {
+            let canvas = CanvasView(frame: canvasFrame)
+            let window = NSWindow(
+                contentRect: canvasFrame,
+                styleMask: [.titled],
+                backing: .buffered,
+                defer: false
+            )
+            window.contentView = canvas
+            window.makeKeyAndOrderFront(nil)
+            return (canvas, window)
+        }
+
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("picanvas-workspaces-\(UUID().uuidString)")
+        // The pre-workspaces layout lived beside the workspaces directory, not
+        // inside it, so mirror that.
+        let legacyURL = directory.deletingLastPathComponent()
+            .appendingPathComponent("picanvas-legacy-\(UUID().uuidString).json")
+        let store = WorkspaceStore(directory: directory, legacyLayoutURL: legacyURL)
+
+        // --- migration from the single-canvas layout -------------------------
+        let legacySpec = ProcessResolver.makeSpec(
+            kind: .shell,
+            workingDirectory: "/tmp",
+            worldFrame: CGRect(x: 10, y: 10, width: 400, height: 300)
+        )
+        LayoutStore(fileURL: legacyURL).saveNow(LayoutFile(lastWorkingDirectory: "/tmp", nodes: [legacySpec]))
+
+        let (canvas, window) = makeCanvas()
+        let recorder = ContentRecorder()
+        let controller = CanvasController(canvas: canvas, workspaceStore: store)
+        controller.contentFactory = { spec in recorder.make(spec) }
+        controller.restore()
+
+        checker.equal(controller.workspaceCount, 1, "the old single canvas becomes one workspace")
+        checker.equal(controller.activeWorkspaceName, "Default", "and it is named Default")
+        checker.equal(controller.nodeCount, 1, "with its nodes")
+        checker.equal(
+            canvas.nodeView(withID: legacySpec.id)?.workspaceID,
+            controller.activeWorkspaceID,
+            "adopted nodes are tagged with the workspace that adopted them"
+        )
+        checker.equal(recorder.content(for: legacySpec.id)?.startedRequests.count, 1, "its process starts")
+
+        // --- a second workspace keeps the first one alive --------------------
+        canvas.setViewport(zoom: 0.5, pan: CGPoint(x: 100, y: 50), notify: false)
+        let firstWorkspace = controller.activeWorkspaceID
+        let secondWorkspace = controller.createWorkspace(named: "Second")
+
+        checker.equal(controller.workspaceCount, 2, "a workspace can be created")
+        checker.equal(controller.activeWorkspaceName, "Second", "and becomes the one on screen")
+        checker.equal(controller.nodeCount, 0, "which is empty")
+        checker.equal(
+            canvas.nodeView(withID: legacySpec.id)?.isHidden,
+            true,
+            "the other workspace's node is hidden"
+        )
+        checker.equal(
+            recorder.content(for: legacySpec.id)?.terminateCount,
+            0,
+            "but its agent keeps running"
+        )
+        checker.equal(
+            recorder.content(for: legacySpec.id)?.startedRequests.count,
+            1,
+            "and is not started twice"
+        )
+        let hiddenFrame = canvas.nodeView(withID: legacySpec.id)?.frame ?? .zero
+        let hiddenCentre = CGPoint(x: hiddenFrame.midX, y: hiddenFrame.midY)
+        checker.check(canvas.node(at: hiddenCentre) == nil, "a hidden node does not take clicks")
+        checker.check(!canvas.terminalHandlesScroll(at: hiddenCentre), "nor scroll")
+
+        // --- each canvas remembers its own viewport --------------------------
+        canvas.setViewport(zoom: 1.7, pan: CGPoint(x: -30, y: -40), notify: false)
+        controller.activateWorkspace(id: firstWorkspace)
+        checker.close(canvas.zoom, 0.5, 0.001, "the first workspace's zoom comes back")
+        checker.close(canvas.pan.x, 100, 0.001, "and its pan")
+        checker.equal(
+            canvas.nodeView(withID: legacySpec.id)?.isHidden,
+            false,
+            "its nodes are visible again"
+        )
+        controller.activateWorkspace(id: secondWorkspace)
+        checker.close(canvas.zoom, 1.7, 0.001, "the second workspace's zoom comes back")
+
+        // --- naming ---------------------------------------------------------
+        controller.renameWorkspace(id: secondWorkspace, to: "  Auth refactor  ")
+        checker.equal(controller.activeWorkspaceName, "Auth refactor", "a workspace can be renamed")
+        controller.renameWorkspace(id: secondWorkspace, to: "   ")
+        checker.equal(controller.activeWorkspaceName, "Auth refactor", "an empty name is ignored")
+
+        // --- the switcher's rows ---------------------------------------------
+        let rows = controller.workspacePaletteRows()
+        checker.equal(rows.filter { !$0.isCreate }.count, 2, "every workspace is listed")
+        checker.check(rows.contains { $0.isCreate }, "with an offer to create another")
+        checker.check(
+            controller.orderedWorkspaceRows().contains { $0.id == controller.activeWorkspaceID },
+            "the active workspace is among them"
+        )
+        controller.activateWorkspace(id: firstWorkspace)
+        checker.equal(controller.paletteEntries().count, 1, "the node list is the active workspace's")
+        controller.activateWorkspace(id: secondWorkspace)
+        checker.equal(controller.paletteEntries().count, 0, "and follows a switch")
+
+        // --- restarting from disk --------------------------------------------
+        controller.saveNow()
+        let (canvas2, window2) = makeCanvas()
+        let recorder2 = ContentRecorder()
+        let controller2 = CanvasController(canvas: canvas2, workspaceStore: store)
+        controller2.contentFactory = { spec in recorder2.make(spec) }
+        controller2.restore()
+
+        checker.equal(controller2.workspaceCount, 2, "both workspaces come back")
+        checker.equal(controller2.nodeCount, 0, "the most recently used one opens first")
+        checker.equal(
+            recorder2.content(for: legacySpec.id)?.startedRequests.count,
+            0,
+            "nodes in workspaces you have not opened do not start"
+        )
+        controller2.activateWorkspace(id: firstWorkspace)
+        checker.equal(controller2.nodeCount, 1, "opening the other workspace brings its nodes")
+        checker.equal(
+            recorder2.content(for: legacySpec.id)?.startedRequests.count,
+            1,
+            "and starts them then"
+        )
+
+        // --- deleting ---------------------------------------------------------
+        controller2.activateWorkspace(id: secondWorkspace)
+        controller2.deleteWorkspace(id: secondWorkspace)
+        checker.equal(controller2.workspaceCount, 1, "a workspace can be deleted")
+        checker.equal(controller2.activeWorkspaceName, "Default", "and the app falls back to another")
+        controller2.deleteWorkspace(id: firstWorkspace)
+        checker.equal(controller2.workspaceCount, 1, "the last workspace cannot be deleted")
+        checker.equal(
+            recorder2.content(for: legacySpec.id)?.terminateCount,
+            0,
+            "deleting a workspace does not stop another's agents"
+        )
+
+        // --- deleting the one you are in stops its agents --------------------
+        let third = controller2.createWorkspace(named: "Third")
+        controller2.newNode(kind: .shell)
+        guard let thirdNode = canvas2.nodeViews.last?.nodeID else {
+            checker.check(false, "node created in the third workspace")
+            window.close()
+            window2.close()
+            return
+        }
+        controller2.deleteWorkspace(id: third)
+        checker.equal(
+            recorder2.content(for: thirdNode)?.terminateCount,
+            1,
+            "deleting a workspace stops the agents in it"
+        )
+        checker.equal(controller2.workspaceCount, 1, "and leaves the others")
+
+        window.close()
+        window2.close()
+        try? FileManager.default.removeItem(at: directory)
     }
 
     /// Quitting a shell should close its node, but a failure should leave it
@@ -1042,7 +1245,7 @@ enum SelfTest {
 
         let layoutURL = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("picanvas-exit-\(UUID().uuidString).json")
-        let controller = CanvasController(canvas: canvas, store: LayoutStore(fileURL: layoutURL))
+        let controller = CanvasController(canvas: canvas, workspaceStore: WorkspaceStore(directory: URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("picanvas-ws-\(UUID().uuidString)"), legacyLayoutURL: layoutURL))
         let recorder = ContentRecorder()
         controller.contentFactory = { spec in recorder.make(spec) }
 
@@ -1118,7 +1321,7 @@ enum SelfTest {
 
         let layoutURL = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("picanvas-scroll-\(UUID().uuidString).json")
-        let controller = CanvasController(canvas: canvas, store: LayoutStore(fileURL: layoutURL))
+        let controller = CanvasController(canvas: canvas, workspaceStore: WorkspaceStore(directory: URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("picanvas-ws-\(UUID().uuidString)"), legacyLayoutURL: layoutURL))
         controller.contentFactory = { _ in RecordingContent() }
 
         checker.check(
@@ -1246,7 +1449,14 @@ enum SelfTest {
         window.contentView = canvas
         window.makeKeyAndOrderFront(nil)
 
-        let controller = CanvasController(canvas: canvas, store: store)
+        let controller = CanvasController(
+            canvas: canvas,
+            workspaceStore: WorkspaceStore(
+                directory: URL(fileURLWithPath: NSTemporaryDirectory())
+                    .appendingPathComponent("picanvas-attention-ws-\(UUID().uuidString)"),
+                legacyLayoutURL: layoutURL
+            )
+        )
         controller.sessionsRoot = root
         controller.contentFactory = { _ in RecordingContent() }
         controller.restore()

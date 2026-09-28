@@ -2,7 +2,7 @@ import AppKit
 
 /// A view whose origin is the top left, so the palette's layout reads top-down
 /// like the code that computes it.
-final class NodePaletteCard: NSView {
+final class PaletteCard: NSView {
     override var isFlipped: Bool { true }
 }
 
@@ -11,25 +11,41 @@ final class NodePaletteCard: NSView {
 /// Deliberately an overlay rather than a window: it keeps the canvas visible
 /// (so you can see a node light up as you move through the list), needs no window
 /// management, and cannot end up behind the terminal it is switching to.
-final class NodePaletteView: NSView {
+final class PaletteView: NSView {
 
-    /// Chosen node. The caller focuses it and hides the palette.
-    var onSelect: ((UUID) -> Void)?
+    /// A row was chosen.
+    var onSelectRow: ((PaletteRow) -> Void)?
+    /// The user asked to remove a row, with ⌫.
+    var onDeleteRow: ((PaletteRow) -> Void)?
+    /// The user asked to rename a row, with F2.
+    var onRenameRow: ((PaletteRow) -> Void)?
+    /// Text was submitted while asking for a name.
+    var onSubmitText: ((String) -> Void)?
     /// Dismissed without choosing, e.g. with Escape.
     var onDismiss: (() -> Void)?
+
+    /// A palette either lists things or asks for one line of text.
+    private enum Mode {
+        case list
+        case prompt
+    }
+
+    private var mode: Mode = .list
+    private var allowsCreate = false
+    private let hintLabel = NSTextField(labelWithString: "")
 
     private static let cardWidth: CGFloat = 560
     private static let rowHeight: CGFloat = 44
     private static let maxListHeight: CGFloat = 320
     private static let searchHeight: CGFloat = 44
 
-    private let card = NodePaletteCard()
+    private let card = PaletteCard()
     private let searchField = NSTextField()
     private let scrollView = NSScrollView()
-    private let listView = NodePaletteListView()
+    private let listView = PaletteListView()
 
-    private var allEntries: [NodePaletteEntry] = []
-    private var ranked: [NodePaletteEntry] = []
+    private var allEntries: [PaletteRow] = []
+    private var ranked: [PaletteRow] = []
     private var keyMonitor: Any?
 
     override var isFlipped: Bool { true }
@@ -75,6 +91,11 @@ final class NodePaletteView: NSView {
         searchField.delegate = self
         card.addSubview(searchField)
 
+        hintLabel.font = NSFont.systemFont(ofSize: 12)
+        hintLabel.textColor = NSColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.42)
+        hintLabel.isHidden = true
+        card.addSubview(hintLabel)
+
         scrollView.drawsBackground = false
         scrollView.hasVerticalScroller = true
         scrollView.scrollerStyle = .overlay
@@ -100,27 +121,85 @@ final class NodePaletteView: NSView {
         window?.makeFirstResponder(searchField)
     }
 
-    func present(entries: [NodePaletteEntry], from window: NSWindow?) {
-        allEntries = entries
+    func present(entries: [PaletteRow], from window: NSWindow?) {
+        presentList(rows: entries, title: "Go to terminal…", placeholder: "Go to terminal…", allowsCreate: false, from: window)
+    }
+
+    /// A list of things to choose from.
+    func presentList(
+        rows: [PaletteRow],
+        title: String,
+        placeholder: String,
+        allowsCreate: Bool,
+        from window: NSWindow?
+    ) {
+        mode = .list
+        self.allowsCreate = allowsCreate
+        allEntries = rows
         searchField.stringValue = ""
+        searchField.placeholderAttributedString = NSAttributedString(
+            string: placeholder,
+            attributes: [
+                .font: NSFont.systemFont(ofSize: 15),
+                .foregroundColor: NSColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.35)
+            ]
+        )
+        hintLabel.stringValue = title
         isHidden = false
         listView.selectedIndex = 0
         updateResults(keepingSelection: false)
         needsLayout = true
         layoutSubtreeIfNeeded()
         window?.makeFirstResponder(searchField)
+        installKeyMonitor()
+    }
 
+    /// One line of text, e.g. naming a workspace.
+    func presentPrompt(title: String, placeholder: String, initialText: String, from window: NSWindow?) {
+        mode = .prompt
+        allowsCreate = false
+        allEntries = []
+        ranked = []
+        listView.entries = []
+        searchField.placeholderAttributedString = NSAttributedString(
+            string: placeholder,
+            attributes: [
+                .font: NSFont.systemFont(ofSize: 15),
+                .foregroundColor: NSColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.35)
+            ]
+        )
+        searchField.stringValue = initialText
+        hintLabel.stringValue = title
+        isHidden = false
+        needsLayout = true
+        layoutSubtreeIfNeeded()
+        window?.makeFirstResponder(searchField)
+        searchField.currentEditor()?.selectAll(nil)
+        installKeyMonitor()
+    }
+
+    private func installKeyMonitor() {
         // A local monitor guarantees Escape closes it regardless of how the field
         // editor routes the key.
-        if keyMonitor == nil {
-            keyMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown]) { [weak self] event in
-                guard let self, self.isPresenting else { return event }
-                if event.keyCode == 53 {
-                    self.dismiss()
-                    return nil
-                }
-                return event
+        guard keyMonitor == nil else { return }
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown]) { [weak self] event in
+            guard let self, self.isPresenting else { return event }
+            if event.keyCode == 53 {
+                self.dismiss()
+                return nil
             }
+            // F2 renames the highlighted row, the same key that renames a node.
+            if event.keyCode == 120, self.mode == .list,
+               self.ranked.indices.contains(self.listView.selectedIndex) {
+                let row = self.ranked[self.listView.selectedIndex]
+                if !row.isCreate {
+                    self.removeKeyMonitor()
+                    self.isHidden = true
+                    self.onRenameRow?(row)
+                }
+                return nil
+            }
+            return event
         }
     }
 
@@ -135,19 +214,24 @@ final class NodePaletteView: NSView {
     }
 
     func activate(index: Int) {
-        guard index >= 0, index < ranked.count else { return }
-        let entry = ranked[index]
+        guard mode == .list, index >= 0, index < ranked.count else { return }
+        let row = ranked[index]
         // Remove the monitor before hiding, so no stray Escape is swallowed later.
+        removeKeyMonitor()
+        isHidden = true
+        onSelectRow?(row)
+    }
+
+    private func removeKeyMonitor() {
         if let keyMonitor {
             NSEvent.removeMonitor(keyMonitor)
             self.keyMonitor = nil
         }
-        isHidden = true
-        onSelect?(entry.id)
     }
 
     /// The single place that decides what the list shows.
     private func updateResults(keepingSelection: Bool) {
+        guard mode == .list else { return }
         let query = searchField.stringValue
         let previous = ranked.indices.contains(listView.selectedIndex)
             ? ranked[listView.selectedIndex].id
@@ -155,14 +239,37 @@ final class NodePaletteView: NSView {
 
         // A single digit picks by position rather than filtering, so the numbers
         // beside the rows always mean something.
-        if let index = NodePaletteRanking.indexForDigit(query, count: allEntries.count) {
-            ranked = NodePaletteRanking.ranked(allEntries, query: "")
+        if let index = PaletteRanking.indexForDigit(query, count: allEntries.count) {
+            ranked = PaletteRanking.ranked(allEntries, query: "")
             listView.entries = ranked
             listView.selectedIndex = index
             return
         }
 
-        ranked = NodePaletteRanking.ranked(allEntries, query: query)
+        var results = PaletteRanking.ranked(allEntries, query: query)
+
+        // Offer to create whatever was typed, unless it already exists.
+        let trimmed = query.trimmingCharacters(in: .whitespaces)
+        let exists = allEntries.contains { $0.title.caseInsensitiveCompare(trimmed) == .orderedSame }
+        if allowsCreate, !trimmed.isEmpty, !exists {
+            results.insert(
+                PaletteRow(
+                    id: UUID(),
+                    title: "Create “\(trimmed)”",
+                    subtitle: "New workspace with an empty canvas",
+                    status: nil,
+                    statusKind: .idle,
+                    isAttention: false,
+                    dotColor: nil,
+                    haystackExtra: "create new",
+                    lastFocused: nil,
+                    createName: trimmed
+                ),
+                at: 0
+            )
+        }
+
+        ranked = results
         listView.entries = ranked
 
         if keepingSelection, let previous, let index = ranked.firstIndex(where: { $0.id == previous }) {
@@ -183,9 +290,9 @@ final class NodePaletteView: NSView {
             x: inset,
             y: y,
             width: card.bounds.width - inset * 2,
-            height: NodePaletteView.searchHeight - 10
+            height: PaletteView.searchHeight - 10
         )
-        y += NodePaletteView.searchHeight
+        y += PaletteView.searchHeight
         let listHeight = listHeight()
         scrollView.frame = CGRect(
             x: inset,
@@ -197,18 +304,18 @@ final class NodePaletteView: NSView {
             x: 0,
             y: 0,
             width: scrollView.contentSize.width,
-            height: max(CGFloat(max(ranked.count, 1)) * NodePaletteView.rowHeight, scrollView.contentSize.height)
+            height: max(CGFloat(max(ranked.count, 1)) * PaletteView.rowHeight, scrollView.contentSize.height)
         )
     }
 
     private func listHeight() -> CGFloat {
         let rows = max(CGFloat(ranked.count), 1)
-        return min(rows * NodePaletteView.rowHeight, NodePaletteView.maxListHeight)
+        return min(rows * PaletteView.rowHeight, PaletteView.maxListHeight)
     }
 
     private func cardFrame() -> CGRect {
-        let width = min(NodePaletteView.cardWidth, bounds.width - 60)
-        let height = NodePaletteView.searchHeight + listHeight() + 12
+        let width = min(PaletteView.cardWidth, bounds.width - 60)
+        let height = PaletteView.searchHeight + listHeight() + 12
         return CGRect(
             x: ((bounds.width - width) / 2).rounded(),
             y: max(60, (bounds.height * 0.14).rounded()),
@@ -240,7 +347,7 @@ final class NodePaletteView: NSView {
 
 // MARK: - Keyboard
 
-extension NodePaletteView: NSTextFieldDelegate {
+extension PaletteView: NSTextFieldDelegate {
 
     func controlTextDidChange(_ obj: Notification) {
         updateResults(keepingSelection: false)
@@ -257,8 +364,16 @@ extension NodePaletteView: NSTextFieldDelegate {
             listView.moveSelection(by: -1)
             return true
         case #selector(NSResponder.insertNewline(_:)):
+            if mode == .prompt {
+                let text = searchField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !text.isEmpty else { return true }
+                removeKeyMonitor()
+                isHidden = true
+                onSubmitText?(text)
+                return true
+            }
             // A digit picks that row; otherwise take the highlighted one.
-            if let index = NodePaletteRanking.indexForDigit(searchField.stringValue, count: ranked.count) {
+            if let index = PaletteRanking.indexForDigit(searchField.stringValue, count: ranked.count) {
                 activate(index: index)
             } else {
                 activate(index: listView.selectedIndex)
@@ -266,6 +381,17 @@ extension NodePaletteView: NSTextFieldDelegate {
             return true
         case #selector(NSResponder.cancelOperation(_:)):
             dismiss()
+            return true
+        case #selector(NSResponder.deleteBackward(_:)),
+             #selector(NSResponder.deleteForward(_:)):
+            // Only when there is nothing to delete in the query.
+            guard mode == .list, searchField.stringValue.isEmpty,
+                  ranked.indices.contains(listView.selectedIndex) else { return false }
+            let row = ranked[listView.selectedIndex]
+            guard !row.isCreate else { return true }
+            removeKeyMonitor()
+            isHidden = true
+            onDeleteRow?(row)
             return true
         default:
             return false
@@ -278,9 +404,9 @@ extension NodePaletteView: NSTextFieldDelegate {
 /// Draws the rows. A hand-drawn list rather than NSTableView: the rows are
 /// bespoke (dot, title, subtitle, status pill, index), and this keeps the look
 /// identical to the canvas chrome without cell reuse or nibs.
-final class NodePaletteListView: NSView {
+final class PaletteListView: NSView {
 
-    var entries: [NodePaletteEntry] = [] {
+    var entries: [PaletteRow] = [] {
         didSet {
             needsDisplay = true
             needsLayout = true
@@ -303,7 +429,7 @@ final class NodePaletteListView: NSView {
     override var acceptsFirstResponder: Bool { false }
 
     private func rowRect(_ index: Int) -> CGRect {
-        CGRect(x: 0, y: CGFloat(index) * NodePaletteListView.rowHeight, width: bounds.width, height: NodePaletteListView.rowHeight)
+        CGRect(x: 0, y: CGFloat(index) * PaletteListView.rowHeight, width: bounds.width, height: PaletteListView.rowHeight)
     }
 
     func moveSelection(by delta: Int) {
@@ -325,7 +451,7 @@ final class NodePaletteListView: NSView {
 
     override func mouseDown(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
-        let index = Int(point.y / NodePaletteListView.rowHeight)
+        let index = Int(point.y / PaletteListView.rowHeight)
         guard index >= 0, index < entries.count else { return }
         selectedIndex = index
         onActivate?(index)
@@ -352,12 +478,12 @@ final class NodePaletteListView: NSView {
         ]
         let size = (text as NSString).size(withAttributes: attributes)
         (text as NSString).draw(
-            at: CGPoint(x: 14, y: (NodePaletteListView.rowHeight - size.height) / 2),
+            at: CGPoint(x: 14, y: (PaletteListView.rowHeight - size.height) / 2),
             withAttributes: attributes
         )
     }
 
-    private func drawRow(_ entry: NodePaletteEntry, index: Int, rect: CGRect) {
+    private func drawRow(_ entry: PaletteRow, index: Int, rect: CGRect) {
         let isSelected = index == selectedIndex
         if isSelected {
             NSColor(srgbRed: 0.42, green: 0.60, blue: 0.98, alpha: 0.22).setFill()
@@ -376,21 +502,23 @@ final class NodePaletteListView: NSView {
         }
         left += 18
 
-        // Kind dot, matching the node chrome.
+        // Kind dot, matching the node chrome. Create rows get a plus instead.
         let dotDiameter: CGFloat = 8
-        let accent = entry.kind.accent
-        NSColor(
-            srgbRed: CGFloat(accent.0),
-            green: CGFloat(accent.1),
-            blue: CGFloat(accent.2),
-            alpha: 1
-        ).setFill()
-        NSBezierPath(ovalIn: CGRect(
-            x: left,
-            y: rect.minY + (rect.height - dotDiameter) / 2,
-            width: dotDiameter,
-            height: dotDiameter
-        )).fill()
+        if entry.isCreate {
+            let attributes: [NSAttributedString.Key: Any] = [
+                .font: NSFont.systemFont(ofSize: 14, weight: .medium),
+                .foregroundColor: NSColor(srgbRed: 0.55, green: 0.75, blue: 1.0, alpha: 1)
+            ]
+            ("+" as NSString).draw(at: CGPoint(x: left - 1, y: rect.minY + (rect.height - 17) / 2), withAttributes: attributes)
+        } else if let dotColor = entry.dotColor {
+            dotColor.setFill()
+            NSBezierPath(ovalIn: CGRect(
+                x: left,
+                y: rect.minY + (rect.height - dotDiameter) / 2,
+                width: dotDiameter,
+                height: dotDiameter
+            )).fill()
+        }
         left += dotDiameter + 10
 
         // Status pill, right aligned.
@@ -432,7 +560,7 @@ final class NodePaletteListView: NSView {
         ]
 
         let textWidth = max(right - left, 40)
-        let title = entry.title.isEmpty ? entry.kind.displayName : entry.title
+        let title = entry.title.isEmpty ? entry.haystackExtra : entry.title
         let titleHeight: CGFloat = 17
         (title as NSString).draw(
             in: CGRect(x: left, y: rect.minY + 7, width: textWidth, height: titleHeight),
