@@ -340,6 +340,12 @@ PiCanvas is force-quit, the child processes die with the pty.
 
 - Cost and token history over time (the transcript already carries `usage`; only
   the current totals are shown)
-- Node kinds other than terminals: images, text labels, notes, a browser
+- Node kinds other than terminals, tracked as issues:
+  [#1 images](https://github.com/lucas-neuhauss/pi-canvas/issues/1) ·
+  [#2 text labels](https://github.com/lucas-neuhauss/pi-canvas/issues/2) ·
+  [#3 notes](https://github.com/lucas-neuhauss/pi-canvas/issues/3) ·
+  [#4 browser](https://github.com/lucas-neuhauss/pi-canvas/issues/4) — all four
+  want the same precursor, described in #1: a node currently holds a *process*
+  rather than *content*, which is what makes an image or a note awkward today
 - Node connections, drag-to-snap, a minimap
 - A first-run welcome state instead of an empty canvas
