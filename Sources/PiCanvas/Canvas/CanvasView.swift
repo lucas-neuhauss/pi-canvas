@@ -1,4 +1,5 @@
 import AppKit
+import UniformTypeIdentifiers
 
 struct CanvasViewport: Equatable {
     var zoom: CGFloat = 1
@@ -20,6 +21,10 @@ protocol CanvasViewDelegate: AnyObject {
     func canvasView(_ canvas: CanvasView, didFocus nodeID: UUID?)
     /// The user renamed a node.
     func canvasView(_ canvas: CanvasView, didRename nodeID: UUID, to title: String)
+    /// An image file was dropped on the canvas. Returns true when a node was made.
+    func canvasView(_ canvas: CanvasView, didReceiveImageDropOf url: URL, atWorldPoint point: CGPoint) -> Bool
+    /// A node was dropped onto another node. Returns true when the drop was used.
+    func canvasView(_ canvas: CanvasView, nodeID: UUID, didReceiveDropFrom sourceNodeID: UUID) -> Bool
 }
 
 /// An infinite, zoomable, pannable plane that hosts node views.
@@ -66,6 +71,8 @@ final class CanvasView: NSView {
         super.init(frame: frameRect)
         wantsLayer = true
         layer?.backgroundColor = backgroundColor.cgColor
+        // Dropping an image file anywhere on the plane makes an image node.
+        registerForDraggedTypes([.fileURL])
     }
 
     required init?(coder: NSCoder) {
@@ -261,6 +268,41 @@ final class CanvasView: NSView {
     /// The visible node under a point, if any.
     func node(at canvasPoint: CGPoint) -> NodeFrameView? {
         visibleNodeViews.last { $0.frame.contains(canvasPoint) }
+    }
+
+    // MARK: - File drops
+
+    /// The first dropped file that is an image, if any.
+    func droppedImageURL(from pasteboard: NSPasteboard) -> URL? {
+        let options: [NSPasteboard.ReadingOptionKey: Any] = [
+            .urlReadingFileURLsOnly: true,
+            .urlReadingContentsConformToTypes: [UTType.image.identifier]
+        ]
+        let urls = pasteboard.readObjects(forClasses: [NSURL.self], options: options) ?? []
+        return urls.compactMap { $0 as? URL }.first
+    }
+
+    /// Creates an image node for a file dropped at a canvas point. Split from
+    /// the `NSDraggingDestination` methods so the logic is testable without a
+    /// synthetic drag session.
+    @discardableResult
+    func handleImageDrop(pasteboard: NSPasteboard, canvasPoint: CGPoint) -> Bool {
+        guard let url = droppedImageURL(from: pasteboard) else { return false }
+        let world = worldPoint(fromScreen: canvasPoint)
+        return canvasDelegate?.canvasView(self, didReceiveImageDropOf: url, atWorldPoint: world) ?? false
+    }
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        droppedImageURL(from: sender.draggingPasteboard) == nil ? [] : .copy
+    }
+
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        droppedImageURL(from: sender.draggingPasteboard) == nil ? [] : .copy
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        let point = convert(sender.draggingLocation, from: nil)
+        return handleImageDrop(pasteboard: sender.draggingPasteboard, canvasPoint: point)
     }
 
     /// Recomputes every node's screen frame. Called after any zoom/pan/frame change.
@@ -536,6 +578,11 @@ private final class NodeDelegateProxy: NodeFrameViewDelegate {
     func nodeFrameView(_ node: NodeFrameView, didRenameTo title: String) {
         guard let canvas else { return }
         canvas.canvasDelegate?.canvasView(canvas, didRename: node.nodeID, to: title)
+    }
+
+    func nodeFrameView(_ node: NodeFrameView, didReceiveDropFrom sourceNodeID: UUID) -> Bool {
+        guard let canvas else { return false }
+        return canvas.canvasDelegate?.canvasView(canvas, nodeID: node.nodeID, didReceiveDropFrom: sourceNodeID) ?? false
     }
 
     func nodeFrameViewDidTakeFirstResponder(_ node: NodeFrameView) {

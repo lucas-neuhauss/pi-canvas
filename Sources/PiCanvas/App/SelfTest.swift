@@ -1,4 +1,5 @@
 import AppKit
+import ImageIO
 
 /// Headless integration tests for the canvas: window, nodes, and *synthesised
 /// mouse events* driving the real interaction code paths.
@@ -63,10 +64,11 @@ enum SelfTest {
         func nodeFrameViewDidRequestFocus(_ node: NodeFrameView) { focusRequests += 1 }
         func nodeFrameViewDidTakeFirstResponder(_ node: NodeFrameView) {}
         func nodeFrameView(_ node: NodeFrameView, didRenameTo title: String) { renamed.append(title) }
+        func nodeFrameView(_ node: NodeFrameView, didReceiveDropFrom sourceNodeID: UUID) -> Bool { false }
     }
 
     /// Records what the controller asked of a node's content.
-    private final class RecordingContent: AgentContent {
+    private final class RecordingContent: ProcessContent {
         let view: NSView = NSView(frame: .zero)
         var onTitleChange: ((String) -> Void)?
         var onExit: ((Int32?) -> Void)?
@@ -76,11 +78,13 @@ enum SelfTest {
         private(set) var startedRequests: [ProcessRequest] = []
         private(set) var terminateCount = 0
         private(set) var focusCount = 0
+        private(set) var sentText: [String] = []
 
         func start(_ request: ProcessRequest) { startedRequests.append(request) }
         func terminate() { terminateCount += 1 }
         func focus() { focusCount += 1 }
         func setFocused(_ focused: Bool) {}
+        func send(text: String) { sentText.append(text) }
     }
 
     /// Shared, reference-typed recorder of the contents the controller created.
@@ -88,7 +92,7 @@ enum SelfTest {
         var contents: [UUID: RecordingContent] = [:]
 
         @MainActor
-        func make(_ spec: NodeSpec) -> AgentContent {
+        func make(_ spec: NodeSpec) -> NodeContent {
             let content = RecordingContent()
             contents[spec.id] = content
             return content
@@ -125,7 +129,7 @@ enum SelfTest {
 
         let controller = CanvasController(canvas: canvas, workspaceStore: WorkspaceStore(directory: URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("picanvas-ws-\(UUID().uuidString)"), legacyLayoutURL: layoutURL))
         let recorder = ContentRecorder()
-        controller.contentFactory = { spec in recorder.make(spec) }
+        controller.contentFactory = { spec, _ in recorder.make(spec) }
 
         testCoordinateConversion(canvas: canvas, checker: checker)
         testZoom(canvas: canvas, checker: checker)
@@ -135,6 +139,9 @@ enum SelfTest {
         testDelete(canvas: canvas, controller: controller, recorder: recorder, checker: checker)
         testPersistence(checker: checker)
         testZOrder(canvas: canvas, controller: controller, checker: checker)
+        testNodeKinds(checker: checker)
+        testAssetStore(checker: checker)
+        testImageNodes(checker: checker)
         testPiSessionBinding(checker: checker)
         testAgentStatusWatcher(checker: checker)
         testGhosttyConfig(checker: checker)
@@ -358,8 +365,14 @@ enum SelfTest {
             .appendingPathComponent("picanvas-persist-\(UUID().uuidString)")
         let legacyURL = directory.appendingPathComponent("layout.json")
         let store = WorkspaceStore(directory: directory, legacyLayoutURL: legacyURL)
-        let controller = CanvasController(canvas: canvas, workspaceStore: store)
-        controller.contentFactory = { _ in RecordingContent() }
+        let stores = tempStores(in: directory)
+        let controller = CanvasController(
+            canvas: canvas,
+            workspaceStore: store,
+            scrollbackStore: stores.scrollback,
+            assetStore: stores.assets
+        )
+        controller.contentFactory = { _, _ in RecordingContent() }
 
         controller.newNode(kind: .shell)
         guard let node = canvas.nodeViews.first else {
@@ -398,8 +411,13 @@ enum SelfTest {
         window2.contentView = canvas2
         window2.makeKeyAndOrderFront(nil)
 
-        let controller2 = CanvasController(canvas: canvas2, workspaceStore: store)
-        controller2.contentFactory = { _ in RecordingContent() }
+        let controller2 = CanvasController(
+            canvas: canvas2,
+            workspaceStore: store,
+            scrollbackStore: stores.scrollback,
+            assetStore: stores.assets
+        )
+        controller2.contentFactory = { _, _ in RecordingContent() }
         controller2.restore()
 
         checker.equal(controller2.nodeCount, layout.nodes.count, "restore recreates every node")
@@ -430,6 +448,300 @@ enum SelfTest {
         checker.equal(canvas.orderedNodeIDs.last, first.nodeID, "selecting a node brings it to front")
         checker.equal(canvas.focusedNodeID, first.nodeID, "selection updates focus")
         checker.check(canvas.nodeViews.last === first, "view order matches model order")
+    }
+
+    // MARK: - Node kinds, assets and images
+
+    /// The generalisation itself: every kind is known, and only the terminals
+    /// own a process. Persisted specs keep working as new kinds are added.
+    private static func testNodeKinds(checker: Checker) {
+        print("\nnode kinds")
+        checker.equal(NodeKind.allCases.count, 6, "six node kinds are known")
+        checker.check(NodeKind.shell.ownsProcess && NodeKind.pi.ownsProcess, "terminals own a process")
+        checker.check(
+            ![NodeKind.image, .text, .note, .browser].contains(where: \.ownsProcess),
+            "content kinds do not own a process"
+        )
+        checker.equal(NodeKind.image.displayName, "Image", "the image kind has a name")
+
+        let spec = NodeSpec(
+            kind: .image,
+            worldFrame: CGRect(x: 5, y: 6, width: 320, height: 160),
+            workingDirectory: "/tmp",
+            executable: "",
+            arguments: [],
+            title: "shot.png",
+            asset: "abc123.png"
+        )
+        let data = try? JSONEncoder().encode(spec)
+        let decoded = data.flatMap { try? JSONDecoder().decode(NodeSpec.self, from: $0) }
+        checker.equal(decoded, spec, "an image spec round-trips exactly")
+
+        // A workspace written before image nodes existed has no asset field and
+        // no new kinds: it still has to load.
+        let legacy = """
+        {"id":"\(UUID().uuidString)","kind":"shell","x":1,"y":2,"width":300,"height":200,"workingDirectory":"/tmp","executable":"/bin/zsh","arguments":["-l"]}
+        """
+        let legacySpec = try? JSONDecoder().decode(NodeSpec.self, from: Data(legacy.utf8))
+        checker.equal(legacySpec?.kind, .shell, "a spec written before image support still decodes")
+        checker.check(legacySpec?.asset == nil, "and has no asset")
+    }
+
+    /// The store behind image nodes: content-addressed, deduplicated, prunable.
+    private static func testAssetStore(checker: Checker) {
+        print("\nasset store")
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("picanvas-assets-\(UUID().uuidString)")
+        let store = AssetStore(directory: directory)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        guard let png = makeTestPNG(width: 40, height: 20) else {
+            checker.check(false, "test PNG generated")
+            return
+        }
+
+        let firstName = try? store.store(data: png, fileExtension: "PNG")
+        let secondName = try? store.store(data: png, fileExtension: "png")
+        checker.check(firstName != nil, "an image is stored")
+        checker.equal(firstName, secondName, "identical bytes are stored once")
+        checker.equal(firstName, AssetStore.fileName(for: png, fileExtension: "png"), "the name is the sha256 digest plus extension")
+        checker.check(firstName?.hasSuffix(".png") == true, "the extension is lowercased")
+
+        if let firstName {
+            let size = AssetStore.pixelSize(ofImageAt: store.url(for: firstName))
+            checker.close(size?.width ?? 0, 40, "the stored pixels are readable (width)")
+            checker.close(size?.height ?? 0, 20, "the stored pixels are readable (height)")
+        }
+
+        var rejected = false
+        let textURL = directory.appendingPathComponent("notes.txt")
+        try? "not an image".write(to: textURL, atomically: true, encoding: .utf8)
+        do { _ = try store.store(contentsOf: textURL) } catch { rejected = true }
+        checker.check(rejected, "a non-image file is rejected")
+
+        if let firstName, let otherName = try? store.store(data: Data([1, 2, 3]), fileExtension: "bin") {
+            store.prune(keeping: [firstName])
+            checker.check(FileManager.default.fileExists(atPath: store.url(for: firstName).path), "a referenced asset survives pruning")
+            checker.check(!FileManager.default.fileExists(atPath: store.url(for: otherName).path), "an unreferenced asset is pruned")
+        }
+    }
+
+    /// The whole image-node journey: drop, size from the ratio, survive the
+    /// original's deletion, resize, hand the path to a pi node, persist.
+    private static func testImageNodes(checker: Checker) {
+        print("\nimage nodes")
+
+        let canvasFrame = CGRect(x: 0, y: 0, width: 1200, height: 800)
+        let canvas = CanvasView(frame: canvasFrame)
+        let window = NSWindow(contentRect: canvasFrame, styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentView = canvas
+        window.makeKeyAndOrderFront(nil)
+
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("picanvas-images-\(UUID().uuidString)")
+        let assetStore = AssetStore(directory: directory.appendingPathComponent("assets"))
+        let workspaceStore = WorkspaceStore(
+            directory: directory.appendingPathComponent("workspaces"),
+            legacyLayoutURL: directory.appendingPathComponent("layout.json")
+        )
+        let controller = CanvasController(canvas: canvas, workspaceStore: workspaceStore, assetStore: assetStore)
+        let recorder = ContentRecorder()
+        controller.contentFactory = { spec, _ in recorder.make(spec) }
+        canvas.setViewport(zoom: 1, pan: .zero, notify: false)
+
+        guard let largePNG = makeTestPNG(width: 1280, height: 640) else {
+            checker.check(false, "test PNG generated")
+            window.close()
+            return
+        }
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let largeURL = directory.appendingPathComponent("wide.png")
+        try? largePNG.write(to: largeURL)
+
+        // Size rules: a big image is capped at 640pt on the long side, a tiny one
+        // grows until the node minimums are met; both keep the ratio.
+        let largeSize = CanvasController.imageNodeSize(pixelSize: CGSize(width: 1280, height: 640))
+        checker.equal(largeSize, CGSize(width: 640, height: 320), "a large image is capped at 640pt")
+        let smallSize = CanvasController.imageNodeSize(pixelSize: CGSize(width: 20, height: 10))
+        checker.equal(smallSize, CGSize(width: 300, height: 150), "a small image grows to the node minimums")
+        checker.close(largeSize.width / largeSize.height, 2, 0.001, "the cap keeps the ratio")
+
+        // Drop it: the node lands centred on the pointer.
+        let pasteboard = NSPasteboard(name: NSPasteboard.Name("picanvas-image-drop-\(UUID().uuidString)"))
+        pasteboard.clearContents()
+        pasteboard.writeObjects([largeURL as NSURL])
+        let dropPoint = CGPoint(x: 420, y: 310)
+        checker.check(
+            canvas.handleImageDrop(pasteboard: pasteboard, canvasPoint: dropPoint),
+            "dropping an image on the canvas makes a node"
+        )
+
+        guard let imageNode = canvas.nodeViews.last,
+              let imageSpec = controller.specs[imageNode.nodeID] else {
+            checker.check(false, "the image node exists")
+            window.close()
+            return
+        }
+        checker.equal(imageSpec.kind, .image, "the node's kind is image")
+        checker.equal(imageNode.title, "wide.png", "the title is the file name")
+        checker.close(imageNode.worldFrame.midX, dropPoint.x, 1, "the node is centred on the drop (x)")
+        checker.close(imageNode.worldFrame.midY, dropPoint.y, 1, "the node is centred on the drop (y)")
+        checker.close(imageNode.worldFrame.width, 640, 1, "the node is 640 wide")
+        checker.close(imageNode.worldFrame.height, 320, 1, "the node is 320 high")
+        checker.close(imageNode.contentAspectRatio ?? 0, 2, 0.001, "the node remembers the image ratio")
+
+        guard let asset = imageSpec.asset else {
+            checker.check(false, "the spec references an asset")
+            window.close()
+            return
+        }
+        let storedURL = assetStore.url(for: asset)
+        checker.check(FileManager.default.fileExists(atPath: storedURL.path), "the bytes were copied into the store")
+        checker.equal(asset, AssetStore.fileName(for: largePNG, fileExtension: "png"), "the asset is named by its hash")
+        checker.close(AssetStore.pixelSize(ofImageAt: storedURL)?.width ?? 0, 1280, "the stored image keeps its pixels")
+
+        // The original may go away; the node does not care.
+        try? FileManager.default.removeItem(at: largeURL)
+        checker.check(FileManager.default.fileExists(atPath: storedURL.path), "deleting the original keeps the copy")
+
+        // And the real factory really draws it from the copy: render the content
+        // view and look for the image's colour at the centre.
+        if let spec = controller.specs[imageNode.nodeID] {
+            let realContent = NodeContentFactory.make(spec: spec, assetStore: assetStore)
+            checker.check(realContent is ImageContent, "the real factory builds image content for an image spec")
+            let imageView = realContent.view
+            imageView.frame = CGRect(x: 0, y: 0, width: 320, height: 160)
+            imageView.layoutSubtreeIfNeeded()
+            if let rep = imageView.bitmapImageRepForCachingDisplay(in: imageView.bounds) {
+                imageView.cacheDisplay(in: imageView.bounds, to: rep)
+                let centre = rep.colorAt(x: rep.pixelsWide / 2, y: rep.pixelsHigh / 2)?.usingColorSpace(.sRGB)
+                checker.check(
+                    (centre?.redComponent ?? 0) > 0.5 && (centre?.greenComponent ?? 1) < 0.6,
+                    "the surviving copy renders (centre pixel is the image colour)"
+                )
+            } else {
+                checker.check(false, "the image view can be rendered")
+            }
+        } else {
+            checker.check(false, "the image spec is available to the factory")
+        }
+
+        // A non-image file is not an image drop.
+        let textURL = directory.appendingPathComponent("notes.txt")
+        try? "not an image".write(to: textURL, atomically: true, encoding: .utf8)
+        let textPasteboard = NSPasteboard(name: NSPasteboard.Name("picanvas-text-drop-\(UUID().uuidString)"))
+        textPasteboard.clearContents()
+        textPasteboard.writeObjects([textURL as NSURL])
+        checker.check(
+            !canvas.handleImageDrop(pasteboard: textPasteboard, canvasPoint: CGPoint(x: 100, y: 100)),
+            "a text file is not an image drop"
+        )
+
+        // Resizing follows the ratio.
+        let before = imageNode.worldFrame
+        let grip = CGPoint(x: imageNode.frame.maxX - 6, y: imageNode.frame.maxY - 6)
+        drag(canvas: canvas, from: grip, to: CGPoint(x: grip.x - 200, y: grip.y), on: imageNode)
+        checker.close(imageNode.worldFrame.width, before.width - 200, 1, "the corner drag resizes the width")
+        checker.close(imageNode.worldFrame.width / imageNode.worldFrame.height, 2, 0.02, "the ratio survives resizing")
+
+        // Image → pi: the drop types the asset's path into the agent.
+        controller.newNode(kind: .pi)
+        guard let piID = canvas.focusedNodeID,
+              let piNode = canvas.nodeView(withID: piID),
+              let piContent = recorder.content(for: piID) else {
+            checker.check(false, "a pi node exists to drop onto")
+            window.close()
+            return
+        }
+        let dragPasteboard = NSPasteboard(name: NSPasteboard.Name("picanvas-node-drag-\(UUID().uuidString)"))
+        dragPasteboard.clearContents()
+        let dragItem = NSPasteboardItem()
+        dragItem.setString(imageNode.nodeID.uuidString, forType: NodeDragPasteboard.type)
+        dragPasteboard.writeObjects([dragItem])
+
+        checker.check(piNode.canAcceptNodeDrop(dragPasteboard), "a pi node accepts an image node drag")
+        checker.check(!imageNode.canAcceptNodeDrop(dragPasteboard), "an image node does not accept node drags")
+        checker.check(piNode.acceptNodeDrop(dragPasteboard), "the drop is accepted")
+        checker.equal(piContent.sentText, [storedURL.path + "\n"], "the asset path and a newline land in the terminal")
+        checker.equal(canvas.focusedNodeID, piID, "the pi node takes focus after the drop")
+
+        // And the source really is what put that identity on the pasteboard.
+        let sourceView = ImageContentView(
+            nodeID: imageNode.nodeID,
+            assetURL: storedURL,
+            image: NSImage(contentsOf: storedURL)
+        )
+        let sourcePasteboard = NSPasteboard(name: NSPasteboard.Name("picanvas-node-drag-source-\(UUID().uuidString)"))
+        sourcePasteboard.clearContents()
+        sourcePasteboard.writeObjects([sourceView.makeDragPasteboardItem()])
+        checker.equal(
+            NodeDragPasteboard.sourceNodeID(from: sourcePasteboard),
+            imageNode.nodeID,
+            "the image view's drag carries the node's id"
+        )
+
+        // Persistence: kind, asset and shape survive a reload.
+        controller.saveNow()
+        let persisted = workspaceStore.loadAll().first?.layout.nodes.first { $0.id == imageNode.nodeID }
+        checker.equal(persisted?.kind, .image, "the image node persists")
+        checker.equal(persisted?.asset, asset, "the asset reference persists")
+
+        let canvas2 = CanvasView(frame: canvasFrame)
+        let window2 = NSWindow(contentRect: canvasFrame, styleMask: [.titled], backing: .buffered, defer: false)
+        window2.contentView = canvas2
+        window2.makeKeyAndOrderFront(nil)
+        let controller2 = CanvasController(
+            canvas: canvas2,
+            workspaceStore: workspaceStore,
+            scrollbackStore: ScrollbackStore(directory: directory.appendingPathComponent("scrollback")),
+            assetStore: assetStore
+        )
+        let recorder2 = ContentRecorder()
+        controller2.contentFactory = { spec, _ in recorder2.make(spec) }
+        controller2.restore()
+        let restored = canvas2.nodeView(withID: imageNode.nodeID)
+        checker.check(restored != nil, "the image node comes back after relaunch")
+        checker.close(restored?.contentAspectRatio ?? 0, 2, 0.001, "the restored node still knows its ratio")
+
+        // Closing the last reference removes the copy.
+        controller2.close(nodeID: imageNode.nodeID)
+        checker.check(!FileManager.default.fileExists(atPath: storedURL.path), "closing the node removes its unreferenced asset")
+
+        window2.close()
+        window.close()
+        try? FileManager.default.removeItem(at: directory)
+    }
+
+    /// Temp stores for a controller that will call `restore()`. Restoring
+    /// prunes both stores, and a test must never prune the developer's real
+    /// `~/Library/Application Support/PiCanvas`.
+    private static func tempStores(in directory: URL) -> (scrollback: ScrollbackStore, assets: AssetStore) {
+        (
+            ScrollbackStore(directory: directory.appendingPathComponent("scrollback")),
+            AssetStore(directory: directory.appendingPathComponent("assets"))
+        )
+    }
+
+    /// A small valid PNG in a distinctive colour, written fresh for each size
+    /// so bytes differ and pixels can be recognised after rendering.
+    private static func makeTestPNG(width: Int, height: Int) -> Data? {
+        guard let context = CGContext(
+            data: nil,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: width * 4,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return nil }
+        context.setFillColor(CGColor(red: 0.92, green: 0.35, blue: 0.08, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        guard let image = context.makeImage() else { return nil }
+        let data = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(data, "public.png" as CFString, 1, nil) else { return nil }
+        CGImageDestinationAddImage(destination, image, nil)
+        guard CGImageDestinationFinalize(destination) else { return nil }
+        return data as Data
     }
 
     // MARK: - Real PTY round trip
@@ -776,7 +1088,7 @@ enum SelfTest {
         let layoutURL = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("picanvas-zoomscroll-\(UUID().uuidString).json")
         let controller = CanvasController(canvas: canvas, workspaceStore: WorkspaceStore(directory: URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("picanvas-ws-\(UUID().uuidString)"), legacyLayoutURL: layoutURL))
-        controller.contentFactory = { _ in RecordingContent() }
+        controller.contentFactory = { _, _ in RecordingContent() }
 
         controller.newNode(kind: .shell)
         controller.newNode(kind: .shell)
@@ -895,7 +1207,7 @@ enum SelfTest {
         let layoutURL = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("picanvas-palette-\(UUID().uuidString).json")
         let controller = CanvasController(canvas: canvas, workspaceStore: WorkspaceStore(directory: URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("picanvas-ws-\(UUID().uuidString)"), legacyLayoutURL: layoutURL))
-        controller.contentFactory = { _ in RecordingContent() }
+        controller.contentFactory = { _, _ in RecordingContent() }
         controller.newNode(kind: .shell)
         controller.newNode(kind: .pi)
 
@@ -1007,7 +1319,7 @@ enum SelfTest {
         )
         let controller = CanvasController(canvas: canvas, workspaceStore: store)
         let recorder = ContentRecorder()
-        controller.contentFactory = { spec in recorder.make(spec) }
+        controller.contentFactory = { spec, _ in recorder.make(spec) }
 
         controller.newNode(kind: .shell)
         guard let id = canvas.nodeViews.last?.nodeID else {
@@ -1096,8 +1408,14 @@ enum SelfTest {
 
         let (canvas, window) = makeCanvas()
         let recorder = ContentRecorder()
-        let controller = CanvasController(canvas: canvas, workspaceStore: store)
-        controller.contentFactory = { spec in recorder.make(spec) }
+        let stores = tempStores(in: directory)
+        let controller = CanvasController(
+            canvas: canvas,
+            workspaceStore: store,
+            scrollbackStore: stores.scrollback,
+            assetStore: stores.assets
+        )
+        controller.contentFactory = { spec, _ in recorder.make(spec) }
         controller.restore()
 
         checker.equal(controller.workspaceCount, 1, "the old single canvas becomes one workspace")
@@ -1174,8 +1492,13 @@ enum SelfTest {
         controller.saveNow()
         let (canvas2, window2) = makeCanvas()
         let recorder2 = ContentRecorder()
-        let controller2 = CanvasController(canvas: canvas2, workspaceStore: store)
-        controller2.contentFactory = { spec in recorder2.make(spec) }
+        let controller2 = CanvasController(
+            canvas: canvas2,
+            workspaceStore: store,
+            scrollbackStore: stores.scrollback,
+            assetStore: stores.assets
+        )
+        controller2.contentFactory = { spec, _ in recorder2.make(spec) }
         controller2.restore()
 
         checker.equal(controller2.workspaceCount, 2, "both workspaces come back")
@@ -1247,7 +1570,7 @@ enum SelfTest {
             .appendingPathComponent("picanvas-exit-\(UUID().uuidString).json")
         let controller = CanvasController(canvas: canvas, workspaceStore: WorkspaceStore(directory: URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("picanvas-ws-\(UUID().uuidString)"), legacyLayoutURL: layoutURL))
         let recorder = ContentRecorder()
-        controller.contentFactory = { spec in recorder.make(spec) }
+        controller.contentFactory = { spec, _ in recorder.make(spec) }
 
         func startNode() -> (id: UUID, content: RecordingContent)? {
             controller.newNode(kind: .shell)
@@ -1322,7 +1645,7 @@ enum SelfTest {
         let layoutURL = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("picanvas-scroll-\(UUID().uuidString).json")
         let controller = CanvasController(canvas: canvas, workspaceStore: WorkspaceStore(directory: URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("picanvas-ws-\(UUID().uuidString)"), legacyLayoutURL: layoutURL))
-        controller.contentFactory = { _ in RecordingContent() }
+        controller.contentFactory = { _, _ in RecordingContent() }
 
         checker.check(
             !canvas.terminalHandlesScroll(at: CGPoint(x: 10, y: 10)),
@@ -1449,16 +1772,17 @@ enum SelfTest {
         window.contentView = canvas
         window.makeKeyAndOrderFront(nil)
 
+        let controllerDirectory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("picanvas-attention-ws-\(UUID().uuidString)")
+        let stores = tempStores(in: controllerDirectory)
         let controller = CanvasController(
             canvas: canvas,
-            workspaceStore: WorkspaceStore(
-                directory: URL(fileURLWithPath: NSTemporaryDirectory())
-                    .appendingPathComponent("picanvas-attention-ws-\(UUID().uuidString)"),
-                legacyLayoutURL: layoutURL
-            )
+            workspaceStore: WorkspaceStore(directory: controllerDirectory, legacyLayoutURL: layoutURL),
+            scrollbackStore: stores.scrollback,
+            assetStore: stores.assets
         )
         controller.sessionsRoot = root
-        controller.contentFactory = { _ in RecordingContent() }
+        controller.contentFactory = { _, _ in RecordingContent() }
         controller.restore()
 
         checker.check(
@@ -1738,13 +2062,16 @@ enum SelfTest {
 
     /// The terminal implementation under test: whatever the app itself would
     /// build. Keeps this suite honest when the terminal backend changes.
-    private static func makeContent() -> AgentContent {
+    private static func makeContent() -> ProcessContent {
         let spec = ProcessResolver.makeSpec(
             kind: .shell,
             workingDirectory: NSTemporaryDirectory(),
             worldFrame: CGRect(x: 0, y: 0, width: 800, height: 500)
         )
-        return TerminalContentFactory.make(spec: spec)
+        guard let content = NodeContentFactory.make(spec: spec, assetStore: AssetStore()) as? ProcessContent else {
+            fatalError("the terminal backend must produce process-backed content")
+        }
+        return content
     }
 
     /// Spins the run loop until `condition` holds or the timeout elapses.

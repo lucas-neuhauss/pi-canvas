@@ -1,14 +1,14 @@
 import AppKit
 import GhosttyKit
 
-/// An `AgentContent` backed by libghostty.
+/// Process-backed node content, hosted by libghostty.
 ///
 /// The canvas does not care which terminal library is behind this; everything
 /// terminal-specific lives here. The pleasant consequence of embedding Ghostty
 /// is that the user's real Ghostty config — font, theme, palette, ligatures,
 /// keybindings, mouse behaviour — applies to every node for free.
 @MainActor
-final class GhosttySurfaceContent: AgentContent {
+final class GhosttySurfaceContent: ProcessContent {
 
     let view: NSView
 

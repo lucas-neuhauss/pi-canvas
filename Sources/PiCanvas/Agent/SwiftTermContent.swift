@@ -2,8 +2,8 @@ import AppKit
 import SwiftTerm
 import Darwin
 
-/// A node's content: a real PTY hosted by SwiftTerm, running an arbitrary
-/// process (a login shell, or `pi`).
+/// Process-backed node content: a real PTY hosted by SwiftTerm, running an
+/// arbitrary process (a login shell, or `pi`).
 ///
 /// We use `LocalProcessTerminalView` rather than driving `TerminalView` +
 /// `LocalProcess` ourselves. The trade-off is documented in
@@ -12,7 +12,7 @@ import Darwin
 /// gives us process lifecycle callbacks, clipboard handling and input coalescing
 /// for free, which is the right deal for now.
 @MainActor
-final class SwiftTermContent: AgentContent {
+final class SwiftTermContent: ProcessContent {
 
     let view: NSView
 
@@ -138,7 +138,7 @@ final class SwiftTermContent: AgentContent {
     static let defaultCaretColor = NSColor(srgbRed: 0.45, green: 0.70, blue: 1.0, alpha: 1)
     static let defaultSelectionColor = NSColor(srgbRed: 0.42, green: 0.60, blue: 0.98, alpha: 0.35)
 
-    // MARK: - AgentContent
+    // MARK: - ProcessContent
 
     func start(_ request: ProcessRequest) {
         guard !started else { return }

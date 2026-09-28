@@ -1,13 +1,16 @@
 import AppKit
 
-/// A stand-in used when no terminal implementation is installed. It keeps the
-/// canvas fully usable (and testable) independently of the terminal library.
-final class MissingContentView: NSView {
+/// A stand-in used when a node's content cannot be created — no terminal
+/// implementation installed, an image whose asset went missing, or a kind that
+/// is not implemented yet. It keeps the canvas fully usable (and testable)
+/// independently of what is behind the seam.
+final class MissingNodeContentView: NSView {
 
-    private let label = NSTextField(labelWithString: "terminal unavailable")
+    private let label: NSTextField
 
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
+    init(message: String) {
+        label = NSTextField(labelWithString: message)
+        super.init(frame: .zero)
         wantsLayer = true
         layer?.backgroundColor = NSColor(srgbRed: 0.055, green: 0.058, blue: 0.066, alpha: 1).cgColor
         label.textColor = NSColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.35)
@@ -33,15 +36,12 @@ final class MissingContentView: NSView {
 }
 
 @MainActor
-final class MissingContent: AgentContent {
-    let view: NSView = MissingContentView(frame: .zero)
+final class MissingNodeContent: NodeContent {
+    let view: NSView
     var onTitleChange: ((String) -> Void)?
-    var onExit: ((Int32?) -> Void)?
     var onFocus: (() -> Void)?
-    var onDirectoryChange: ((String) -> Void)?
 
-    func start(_ request: ProcessRequest) {}
-    func terminate() {}
-    func focus() {}
-    func setFocused(_ focused: Bool) {}
+    init(message: String = "terminal unavailable") {
+        view = MissingNodeContentView(message: message)
+    }
 }

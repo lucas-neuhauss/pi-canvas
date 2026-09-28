@@ -1,15 +1,34 @@
 import Foundation
 import CoreGraphics
 
-/// What kind of process a node hosts.
+/// What kind of content a node holds. Process kinds are backed by a terminal;
+/// the others are the backlog's non-terminal nodes. The canvas itself only
+/// depends on `NodeContent`, so a new kind is a case here plus a content
+/// implementation, nothing more.
 enum NodeKind: String, Codable, CaseIterable {
     case shell
     case pi
+    case image
+    case text
+    case note
+    case browser
 
     var displayName: String {
         switch self {
         case .shell: return "Terminal"
         case .pi: return "pi"
+        case .image: return "Image"
+        case .text: return "Text"
+        case .note: return "Note"
+        case .browser: return "Browser"
+        }
+    }
+
+    /// Whether a node of this kind starts and owns a child process.
+    var ownsProcess: Bool {
+        switch self {
+        case .shell, .pi: return true
+        case .image, .text, .note, .browser: return false
         }
     }
 
@@ -18,6 +37,10 @@ enum NodeKind: String, Codable, CaseIterable {
         switch self {
         case .shell: return (0.42, 0.68, 0.98)
         case .pi: return (0.65, 0.51, 0.98)
+        case .image: return (0.44, 0.84, 0.60)
+        case .text: return (0.86, 0.75, 0.45)
+        case .note: return (0.95, 0.66, 0.40)
+        case .browser: return (0.42, 0.76, 0.92)
         }
     }
 }
@@ -51,6 +74,10 @@ struct NodeSpec: Codable, Identifiable, Equatable {
     /// `pi --session-id` on relaunch resumes the same conversation, and keeping
     /// it per node means two agents in one directory never share a session.
     var sessionID: String?
+    /// For `image` nodes: the file name of the copied asset inside the
+    /// content-addressed asset store. Stored as a name, not a path, so the
+    /// canvas survives the store (or the home directory) moving.
+    var asset: String?
 
     init(
         id: UUID = UUID(),
@@ -62,6 +89,7 @@ struct NodeSpec: Codable, Identifiable, Equatable {
         title: String? = nil,
         customTitle: String? = nil,
         sessionID: String? = nil,
+        asset: String? = nil,
         workspaceID: UUID? = nil
     ) {
         self.id = id
@@ -76,6 +104,7 @@ struct NodeSpec: Codable, Identifiable, Equatable {
         self.title = title
         self.customTitle = customTitle
         self.sessionID = sessionID
+        self.asset = asset
         self.workspaceID = workspaceID
     }
 

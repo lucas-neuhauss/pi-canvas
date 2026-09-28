@@ -88,6 +88,19 @@ What happens when a process exits depends on how it exited:
 The first two are complementary: quitting an agent leaves you a usable terminal,
 and leaving that terminal closes the node.
 
+## Images
+
+Drop an image file (`png`, `jpg`, `gif`, `webp`, `tiff`) from Finder onto the
+canvas and it becomes a node sized from the image's own aspect ratio, capped at
+640 points on the long side. The bytes are copied into
+`~/Library/Application Support/PiCanvas/assets/<sha256>.<ext>`, deduplicated by
+hash, so moving, renaming or deleting the original leaves the node intact.
+Resizing an image node keeps its ratio.
+
+The integration that makes it worth more than a picture viewer: **drag an image
+node onto a pi node** and the asset's path is typed into that agent's terminal,
+followed by a newline — the agent can then read the file.
+
 ## Keyboard
 
 | Shortcut | Action |
@@ -208,19 +221,21 @@ Sources/PiCanvas/
     MainView.swift              canvas + status bar
     SelfTest.swift              headless integration tests (--self-test)
     PreviewHarness.swift        offscreen render harness (--render-preview)
+  Agent/
+    NodeContent.swift           the seam: a node's content, process optional
+    NodeContentFactory.swift    builds content from a spec, by kind
+    SwiftTermContent.swift      SwiftTerm PTY host (the only SwiftTerm importer)
+    ProcessResolver.swift       what to launch, with what environment
+    PiSessionWatcher.swift      tails the transcript, derives agent status
   Canvas/
     CanvasView.swift            infinite pan/zoom plane, world↔screen maths
     NodeFrameView.swift         node chrome: title bar, close, resize, status pill
-  Agent/
-    AgentContent.swift          the seam between canvas and terminal
-    TerminalContent.swift       SwiftTerm PTY host (the only SwiftTerm importer)
-    ProcessResolver.swift       what to launch, with what environment
-    PiSessionWatcher.swift      tails the transcript, derives agent status
-    TerminalContentFactory.swift
+    ImageContent.swift          image node: renders, keeps its ratio, drags out
   Model/
-    AgentModel.swift            NodeSpec / LayoutFile
+    AgentModel.swift            NodeSpec / LayoutFile / NodeKind
     LayoutStore.swift           debounced atomic JSON persistence
     ScrollbackStore.swift       per-node terminal snapshots between launches
+    AssetStore.swift            content-addressed storage for dropped images
 ```
 
 ### Three design decisions worth knowing
@@ -237,8 +252,8 @@ The alternative — a `CALayer` transform — would be two lines of code and wou
 scale a bitmap, making text mushy. Scaling the *font* keeps every glyph rendered
 natively at its true size, so it stays crisp at 20% and at 300%.
 
-**The canvas never imports the terminal library.** `AgentContent` is the seam;
-`TerminalContentFactory` is the only place that knows the terminal exists. That
+**The canvas never imports the terminal library.** `NodeContent` is the seam;
+`NodeContentFactory` is the only place that knows the terminal exists. That
 keeps the canvas, the interaction model and persistence testable without a PTY.
 
 **The transcript is the status API.** `PiSessionWatcher` only reads files pi
@@ -260,13 +275,14 @@ to iterate on and has no external moving parts.
 ## Testing
 
 ```sh
-# 249 checks: coordinate maths, zoom anchoring, drag, resize from every border,
+# 296 checks: coordinate maths, zoom anchoring, drag, resize from every border,
 # delete, renaming, workspaces (migration, keep-alive, lazy start, per-workspace
 # viewports, CRUD), persistence round-trip, process launch, session binding, exit
 # behaviour, scroll and zoom-scroll routing, key repeat, switcher ranking, the
 # agent status state machine, the needs-you indicator and jump, scrollback
-# snapshot/restore, zoom-vs-resize behaviour, Ghostty config parsing, and three
-# real-PTY tests
+# snapshot/restore, zoom-vs-resize behaviour, node kinds and legacy decoding, the
+# asset store (dedup, hash naming, pruning), image drop/sizing/aspect-locked
+# resize/drag-to-pi/persistence, Ghostty config parsing, and three real-PTY tests
 ./build/PiCanvas.app/Contents/MacOS/PiCanvas --self-test
 
 # Render a window with two nodes to PNG without a display server
@@ -327,7 +343,8 @@ scrollback persistence (real PTY)
 Canvas layout lives at
 `~/Library/Application Support/PiCanvas/layout.json`: node positions, sizes,
 kind, working directory, the exact argv to relaunch and the pi session id, plus
-viewport zoom and pan. Terminal snapshots live beside it in `scrollback/`.
+viewport zoom and pan. Terminal snapshots live beside it in `scrollback/`, and
+images copied off Finder drops in `assets/`.
 Writes are debounced and atomic. On launch every node is recreated with its
 process restarted, its agent conversation resumed, and shell scrollback
 restored.
@@ -338,14 +355,14 @@ PiCanvas is force-quit, the child processes die with the pty.
 
 ## Not built yet
 
-- Cost and token history over time (the transcript already carries `usage`; only
-  the current totals are shown)
-- Node kinds other than terminals, tracked as issues:
-  [#1 images](https://github.com/lucas-neuhauss/pi-canvas/issues/1) ·
+- More node kinds, tracked as issues:
   [#2 text labels](https://github.com/lucas-neuhauss/pi-canvas/issues/2) ·
   [#3 notes](https://github.com/lucas-neuhauss/pi-canvas/issues/3) ·
-  [#4 browser](https://github.com/lucas-neuhauss/pi-canvas/issues/4) — all four
-  want the same precursor, described in #1: a node currently holds a *process*
-  rather than *content*, which is what makes an image or a note awkward today
+  [#4 browser](https://github.com/lucas-neuhauss/pi-canvas/issues/4) — all three
+  build on the content seam that
+  [#1 image nodes](https://github.com/lucas-neuhauss/pi-canvas/issues/1)
+  introduced
+- Cost and token history over time (the transcript already carries `usage`; only
+  the current totals are shown)
 - Node connections, drag-to-snap, a minimap
 - A first-run welcome state instead of an empty canvas
