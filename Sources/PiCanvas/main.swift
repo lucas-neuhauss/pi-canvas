@@ -9,6 +9,10 @@ for key in ProcessInfo.processInfo.environment.keys where key.hasPrefix("PI_") {
     unsetenv(key)
 }
 
+// Terminal views need held keys to repeat rather than open the accent picker.
+// Registered before AppKit processes any key event.
+KeyboardDefaults.apply()
+
 // Top-level code is not implicitly main-actor isolated in Swift 5 language
 // mode, but the process entry point genuinely runs on the main thread, so this
 // is safe. The delegate is held by the enclosing scope for the process's

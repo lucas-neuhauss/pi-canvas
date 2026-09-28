@@ -83,6 +83,15 @@ and leaving that terminal closes the node.
 | `Delete` | Close the selected node (when the canvas, not a terminal, has focus) |
 | `⌘C` / `⌘V` / `⌘A` | Copy / paste / select all, routed to the focused terminal |
 
+### Held keys repeat
+
+macOS's press-and-hold accent picker is off for this app, so holding `j` in nvim
+moves the cursor instead of offering `ǰ`. Same mechanism Ghostty's own app uses:
+a registered `ApplePressAndHoldEnabled = false`, not a persistent write to your
+settings. Because registered defaults sit at the bottom of the search order, an
+explicit setting of your own still wins — and if that happens the app says so in
+the log, with the one-line command to override it.
+
 Mouse: two-finger scroll pans (content follows your fingers, like any other
 canvas app), pinch zooms, `⌘`+scroll zooms, drag a title bar to move a node,
 drag **any border or corner** to resize (the cursor changes), click `×` or
@@ -200,11 +209,11 @@ to iterate on and has no external moving parts.
 ## Testing
 
 ```sh
-# 164 checks: coordinate maths, zoom anchoring, drag, resize from every border,
+# 168 checks: coordinate maths, zoom anchoring, drag, resize from every border,
 # delete, persistence round-trip, process launch, session binding, exit
-# behaviour, scroll routing, the agent status state machine, the needs-you
-# indicator and jump, scrollback snapshot/restore, zoom-vs-resize behaviour,
-# Ghostty config parsing, and three real-PTY tests
+# behaviour, scroll routing, key repeat, the agent status state machine, the
+# needs-you indicator and jump, scrollback snapshot/restore, zoom-vs-resize
+# behaviour, Ghostty config parsing, and three real-PTY tests
 ./build/PiCanvas.app/Contents/MacOS/PiCanvas --self-test
 
 # Render a window with two nodes to PNG without a display server

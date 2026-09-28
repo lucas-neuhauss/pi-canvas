@@ -126,6 +126,7 @@ enum SelfTest {
         testAttentionAndJump(checker: checker)
         testScrollRouting(checker: checker)
         testExitBehaviour(checker: checker)
+        testKeyRepeat(checker: checker)
         testScrollbackPersistence(checker: checker)
         testTerminalRoundTrip(checker: checker)
         testResizeReflow(checker: checker)
@@ -656,6 +657,33 @@ enum SelfTest {
         }
 
         try? FileManager.default.removeItem(at: root)
+    }
+
+    /// Holding a letter in a terminal must repeat the key, not open macOS's
+    /// accent picker. The fix is a registered default, so assert it is in place
+    /// and that a deliberate user override would be detected rather than fought.
+    private static func testKeyRepeat(checker: Checker) {
+        print("\nkey repeat")
+        KeyboardDefaults.apply()
+
+        checker.check(
+            KeyboardDefaults.repeatsHeldKeys,
+            "held keys repeat instead of showing accented characters"
+        )
+        checker.check(
+            !UserDefaults.standard.bool(forKey: KeyboardDefaults.pressAndHoldKey),
+            "press-and-hold is disabled for AppKit to read"
+        )
+        // The default must not be a persistent write: the user's own settings win.
+        let appDomain = UserDefaults.standard.persistentDomain(forName: "com.neuhaus.picanvas")
+        checker.check(
+            appDomain?[KeyboardDefaults.pressAndHoldKey] == nil,
+            "we register the default rather than writing to the user's preferences"
+        )
+        checker.check(
+            KeyboardDefaults.overrideWarning() == nil || KeyboardDefaults.explicitOverride() != nil,
+            "an override warning only appears when something really overrides us"
+        )
     }
 
     /// Quitting a shell should close its node, but a failure should leave it

@@ -52,6 +52,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         NSApp.activate()
         installSignalHandlers()
 
+        // Say so in the log when something outranks our keyboard default, so a
+        // terminal that still shows accents is explainable.
+        if let warning = KeyboardDefaults.overrideWarning() {
+            NSLog("[PiCanvas] %@", warning)
+        } else {
+            NSLog("[PiCanvas] held keys repeat (press-and-hold disabled)")
+        }
+
         #if GHOSTTY_TERMINAL
         // Start libghostty before any node exists: it owns the process-wide app
         // and the config that every surface inherits.
