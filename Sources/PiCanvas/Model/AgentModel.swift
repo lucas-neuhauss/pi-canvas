@@ -80,6 +80,9 @@ struct NodeSpec: Codable, Identifiable, Equatable {
     var asset: String?
     /// For `text` nodes: the label's text. Written whenever an edit commits.
     var text: String?
+    /// For `note` nodes: the id of the markdown file in the note store. The file
+    /// is the source of truth; the node only remembers which one is its own.
+    var noteID: UUID?
 
     init(
         id: UUID = UUID(),
@@ -93,6 +96,7 @@ struct NodeSpec: Codable, Identifiable, Equatable {
         sessionID: String? = nil,
         asset: String? = nil,
         text: String? = nil,
+        noteID: UUID? = nil,
         workspaceID: UUID? = nil
     ) {
         self.id = id
@@ -109,6 +113,7 @@ struct NodeSpec: Codable, Identifiable, Equatable {
         self.sessionID = sessionID
         self.asset = asset
         self.text = text
+        self.noteID = noteID
         self.workspaceID = workspaceID
     }
 

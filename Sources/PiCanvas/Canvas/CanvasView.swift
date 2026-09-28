@@ -329,6 +329,7 @@ final class CanvasView: NSView {
         menu.addItem(contextItem("New pi Agent", #selector(contextNewPi(_:))))
         menu.addItem(.separator())
         menu.addItem(contextItem("New Text Label", #selector(contextNewTextLabel(_:))))
+        menu.addItem(contextItem("New Note", #selector(contextNewNote(_:))))
         menu.addItem(contextItem("Add Image…", #selector(contextAddImage(_:))))
         return menu
     }
@@ -349,6 +350,10 @@ final class CanvasView: NSView {
 
     @objc private func contextNewTextLabel(_ sender: Any?) {
         canvasDelegate?.canvasView(self, didRequestNewNodeOfKind: .text, at: contextMenuWorldPoint)
+    }
+
+    @objc private func contextNewNote(_ sender: Any?) {
+        canvasDelegate?.canvasView(self, didRequestNewNodeOfKind: .note, at: contextMenuWorldPoint)
     }
 
     @objc private func contextAddImage(_ sender: Any?) {

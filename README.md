@@ -112,12 +112,24 @@ the label, and its border to resize. Labels are signposts, not destinations, so
 `File → New Text Label` (`⇧⌘T`) does the same without the double-click, and
 right-clicking the canvas offers every creation action at that point.
 
+## Notes
+
+`File → New Note` (`⌘N`), or right-clicking the canvas, makes a note node: a
+plain-text markdown editor over a file kept at
+`~/Library/Application Support/PiCanvas/notes/<uuid>.md`. The file is the source
+of truth — typing saves as you go, and there is no Save button. A `Write` /
+`Preview` toggle in the node renders the markdown natively (headings, lists,
+emphasis, code spans and clickable links), and the first heading names the node.
+Notes live in the workspace they were made in; two workspaces can each hold
+notes without touching each other's.
+
 ## Keyboard
 
 | Shortcut | Action |
 | --- | --- |
 | `⌘T` | New terminal on the canvas |
 | `⌘P` | New `pi` agent on the canvas |
+| `⌘N` | New markdown note on the canvas |
 | `⇧⌘T` | New text label on the canvas |
 | `⇧⌘I` | Add an image (or drop one from Finder) |
 | `⌘W` | Close the focused node (falls back to closing the window) |
@@ -245,11 +257,14 @@ Sources/PiCanvas/
     NodeFrameView.swift         node chrome: title bar, close, resize, status pill
     ImageContent.swift          image node: renders, keeps its ratio, drags out
     TextContent.swift           label node: in-place editing, font follows zoom
+    NoteContent.swift           note node: markdown editor + native preview
+    MarkdownPreview.swift       presentation intents → fonts, lists, links
   Model/
     AgentModel.swift            NodeSpec / LayoutFile / NodeKind
     LayoutStore.swift           debounced atomic JSON persistence
     ScrollbackStore.swift       per-node terminal snapshots between launches
     AssetStore.swift            content-addressed storage for dropped images
+    NoteStore.swift             per-node markdown files under notes/
 ```
 
 ### Three design decisions worth knowing
@@ -289,7 +304,7 @@ to iterate on and has no external moving parts.
 ## Testing
 
 ```sh
-# 330 checks: coordinate maths, zoom anchoring, drag, resize from every border,
+# 354 checks: coordinate maths, zoom anchoring, drag, resize from every border,
 # delete, renaming, workspaces (migration, keep-alive, lazy start, per-workspace
 # viewports, CRUD), persistence round-trip, process launch, session binding, exit
 # behaviour, scroll and zoom-scroll routing, key repeat, switcher ranking, the
@@ -297,8 +312,9 @@ to iterate on and has no external moving parts.
 # snapshot/restore, zoom-vs-resize behaviour, node kinds and legacy decoding, the
 # asset store (dedup, hash naming, pruning), image drop/sizing/aspect-locked
 # resize/drag-to-pi/persistence, label creation/editing/commit/move/resize/
-# rendering/zoom-scaling/persistence and its absence from the switcher, the
-# right-click creation menu, Ghostty config parsing, and three real-PTY tests
+# rendering/zoom-scaling/persistence and its absence from the switcher, note
+# creation/autosave/markdown preview/workspace isolation/restart, the right-click
+# creation menu, Ghostty config parsing, and three real-PTY tests
 ./build/PiCanvas.app/Contents/MacOS/PiCanvas --self-test
 
 # Render a window with two nodes to PNG without a display server
@@ -371,13 +387,12 @@ PiCanvas is force-quit, the child processes die with the pty.
 
 ## Not built yet
 
-- More node kinds, tracked as issues:
-  [#3 notes](https://github.com/lucas-neuhauss/pi-canvas/issues/3) ·
-  [#4 browser](https://github.com/lucas-neuhauss/pi-canvas/issues/4) — both
-  build on the content seam that
-  [#1 image nodes](https://github.com/lucas-neuhauss/pi-canvas/issues/1) and
-  [#2 text labels](https://github.com/lucas-neuhauss/pi-canvas/issues/2)
-  introduced
+- More node kinds, tracked as an issue:
+  [#4 browser](https://github.com/lucas-neuhauss/pi-canvas/issues/4) — it builds
+  on the content seam that
+  [#1 image nodes](https://github.com/lucas-neuhauss/pi-canvas/issues/1),
+  [#2 text labels](https://github.com/lucas-neuhauss/pi-canvas/issues/2) and
+  [#3 notes](https://github.com/lucas-neuhauss/pi-canvas/issues/3) introduced
 - Cost and token history over time (the transcript already carries `usage`; only
   the current totals are shown)
 - Node connections, drag-to-snap, a minimap

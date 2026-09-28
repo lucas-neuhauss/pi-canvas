@@ -7,6 +7,8 @@ import UniformTypeIdentifiers
 final class CanvasController: NSObject {
 
     static let defaultNodeSize = CGSize(width: 720, height: 440)
+    /// Notes start as a page, not a terminal pane.
+    static let defaultNoteNodeSize = CGSize(width: 460, height: 320)
     /// Labels start as a short line, not a terminal pane.
     static let defaultTextNodeSize = CGSize(width: 280, height: 64)
 
@@ -14,6 +16,8 @@ final class CanvasController: NSObject {
     private let workspaceStore: WorkspaceStore
     private let scrollbackStore: ScrollbackStore
     private let assetStore: AssetStore
+    private let noteStore: NoteStore
+    private let stores: NodeStores
 
     /// One canvas's worth of metadata. The nodes themselves live in `specs`,
     /// tagged with the workspace they belong to.
@@ -42,9 +46,9 @@ final class CanvasController: NSObject {
     private var cascadeIndex = 0
 
     /// Creates the content for a node. Injected so the canvas does not depend on
-    /// the terminal implementation. Given the asset store so image content can
-    /// resolve its file.
-    var contentFactory: ((NodeSpec, AssetStore) -> NodeContent)?
+    /// the terminal implementation. Given the stores so image and note content
+    /// can resolve their files.
+    var contentFactory: ((NodeSpec, NodeStores) -> NodeContent)?
 
     /// Where pi keeps its session transcripts. Overridable so tests can drive the
     /// agent-status chain without touching the user's real sessions.
@@ -77,12 +81,15 @@ final class CanvasController: NSObject {
         canvas: CanvasView,
         workspaceStore: WorkspaceStore = WorkspaceStore(),
         scrollbackStore: ScrollbackStore = ScrollbackStore(),
-        assetStore: AssetStore = AssetStore()
+        assetStore: AssetStore = AssetStore(),
+        noteStore: NoteStore = NoteStore()
     ) {
         self.canvas = canvas
         self.workspaceStore = workspaceStore
         self.scrollbackStore = scrollbackStore
         self.assetStore = assetStore
+        self.noteStore = noteStore
+        self.stores = NodeStores(assets: assetStore, notes: noteStore)
         super.init()
         canvas.canvasDelegate = self
     }
@@ -162,6 +169,10 @@ final class CanvasController: NSObject {
         // of the files refers to them.
         let allAssets = nodeSpecs.flatMap { $0.nodes.compactMap(\.asset) }
         assetStore.prune(keeping: Set(allAssets))
+        // And notes: a file only outlives its node if the node was deleted
+        // outside a running app.
+        let allNotes = nodeSpecs.flatMap { $0.nodes.compactMap(\.noteID) }
+        noteStore.prune(keeping: Set(allNotes))
 
         let active = workspaceRecords[0]
         activeWorkspaceID = active.id
@@ -581,6 +592,39 @@ final class CanvasController: NSObject {
         return spec.id
     }
 
+    // MARK: - Note nodes
+
+    /// Creates a note with its own markdown file. The file is the source of
+    /// truth; the node only remembers its id.
+    @discardableResult
+    func createNoteNode(at worldPoint: CGPoint? = nil, text: String = "") -> UUID {
+        let noteID = UUID()
+        noteStore.save(text, for: noteID)
+        let size = CanvasController.defaultNoteNodeSize
+        let centre = worldPoint ?? canvas.viewportCentreWorldPoint()
+        let origin = CGPoint(
+            x: (centre.x - size.width / 2).rounded(),
+            y: (centre.y - size.height / 2).rounded()
+        )
+        let spec = NodeSpec(
+            kind: .note,
+            worldFrame: CGRect(origin: origin, size: size),
+            workingDirectory: defaultWorkingDirectory,
+            executable: "",
+            arguments: [],
+            noteID: noteID,
+            workspaceID: activeWorkspaceID
+        )
+        add(spec: spec, start: true, select: true)
+        reveal(spec.worldFrame)
+        // A note born with text already in it (a script, a test) takes its title
+        // from that text.
+        if let note = contents[spec.id] as? NoteContent, !note.title.isEmpty {
+            applyTitle(note.title, to: spec.id)
+        }
+        return spec.id
+    }
+
     /// Finds a spot for a new node that does not sit on top of an existing one.
     ///
     /// Nodes are tiled horizontally: anything whose vertical band overlaps the
@@ -641,7 +685,7 @@ final class CanvasController: NSObject {
         node.subtitle = Self.abbreviate(spec.workingDirectory)
         specs[spec.id] = spec
 
-        let content = contentFactory?(spec, assetStore) ?? MissingNodeContent()
+        let content = contentFactory?(spec, stores) ?? MissingNodeContent()
         contents[spec.id] = content
         wire(content: content, node: node)
         content.setContentScale(canvas.zoom)
@@ -695,18 +739,22 @@ final class CanvasController: NSObject {
         content.start(request)
     }
 
+    /// Records a title reported by the content, never overwriting a name the
+    /// user chose.
+    private func applyTitle(_ title: String, to id: UUID) {
+        guard let node = canvas.nodeView(withID: id) else { return }
+        specs[id]?.title = title
+        if specs[id]?.customTitle == nil {
+            node.title = title
+        }
+        persist()
+    }
+
     private func wire(content: NodeContent, node: NodeFrameView) {
         let id = node.nodeID
 
         content.onTitleChange = { [weak self] title in
-            guard let self, let node = self.canvas.nodeView(withID: id) else { return }
-            // Remember what the terminal calls itself, but never let it overwrite a
-            // name the user chose.
-            self.specs[id]?.title = title
-            if self.specs[id]?.customTitle == nil {
-                node.title = title
-            }
-            self.persist()
+            self?.applyTitle(title, to: id)
         }
 
         content.onFocus = { [weak self] in
@@ -763,6 +811,7 @@ final class CanvasController: NSObject {
     func close(nodeID: UUID, persisting: Bool = true) {
         guard let node = canvas.nodeView(withID: nodeID) else { return }
         let asset = specs[nodeID]?.asset
+        let note = specs[nodeID]?.noteID
         watchers[nodeID]?.stop()
         watchers[nodeID] = nil
         agentsNeedingAttention.removeAll { $0 == nodeID }
@@ -775,9 +824,12 @@ final class CanvasController: NSObject {
         canvas.removeNodeView(node)
         specs[nodeID] = nil
         // Assets are deduplicated by hash, so one only goes away when the last
-        // node referring to it does.
+        // node referring to it does. Notes are one per node.
         if let asset, !specs.values.contains(where: { $0.asset == asset }) {
             assetStore.remove(asset)
+        }
+        if let note, !specs.values.contains(where: { $0.noteID == note }) {
+            noteStore.remove(note)
         }
         onStateChange?()
         if persisting { persist() }
@@ -1056,10 +1108,12 @@ extension CanvasController: CanvasViewDelegate {
         switch kind {
         case .text:
             createTextNode(at: point)
+        case .note:
+            createNoteNode(at: point)
         case .shell, .pi:
             newNode(kind: kind, at: point)
-        case .image, .note, .browser:
-            // Image files come through the picker; the rest do not exist yet.
+        case .image, .browser:
+            // Image files come through the picker; the browser does not exist yet.
             break
         }
     }

@@ -37,8 +37,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         self.window = window
 
         controller = CanvasController(canvas: canvas)
-        controller.contentFactory = { spec, assetStore in
-            NodeContentFactory.make(spec: spec, assetStore: assetStore)
+        controller.contentFactory = { spec, stores in
+            NodeContentFactory.make(spec: spec, stores: stores)
         }
 
         mainView.statusBar.onNewTerminal = { [weak self] in self?.controller.newNode(kind: .shell) }
@@ -176,6 +176,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     @objc private func newPiAgent(_ sender: Any?) {
         controller.newNode(kind: .pi)
+    }
+
+    @objc private func newNote(_ sender: Any?) {
+        controller.createNoteNode()
     }
 
     @objc private func newTextLabel(_ sender: Any?) {
@@ -410,6 +414,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         fileMenu.addItem(newPiItem)
 
         fileMenu.addItem(.separator())
+
+        let newNoteItem = NSMenuItem(
+            title: "New Note",
+            action: #selector(newNote(_:)),
+            keyEquivalent: "n"
+        )
+        newNoteItem.target = self
+        fileMenu.addItem(newNoteItem)
 
         let newLabelItem = NSMenuItem(
             title: "New Text Label",
