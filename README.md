@@ -99,7 +99,8 @@ Resizing an image node keeps its ratio.
 
 The integration that makes it worth more than a picture viewer: **drag an image
 node onto a pi node** and the asset's path is typed into that agent's terminal,
-followed by a newline — the agent can then read the file.
+followed by a newline — the agent can then read the file. If dragging is not your
+thing, `File → Add Image…` (`⇧⌘I`) opens a picker instead.
 
 ## Labels
 
@@ -108,6 +109,8 @@ Double-click empty canvas and a label appears, already taking text: type, then
 zoom, and the box word-wraps and scrolls. Click and drag the text itself to move
 the label, and its border to resize. Labels are signposts, not destinations, so
 `⌘K` leaves them out. They persist with the workspace like any other node.
+`File → New Text Label` (`⇧⌘T`) does the same without the double-click, and
+right-clicking the canvas offers every creation action at that point.
 
 ## Keyboard
 
@@ -115,6 +118,8 @@ the label, and its border to resize. Labels are signposts, not destinations, so
 | --- | --- |
 | `⌘T` | New terminal on the canvas |
 | `⌘P` | New `pi` agent on the canvas |
+| `⇧⌘T` | New text label on the canvas |
+| `⇧⌘I` | Add an image (or drop one from Finder) |
 | `⌘W` | Close the focused node (falls back to closing the window) |
 | `⌘O` | Choose the folder new nodes start in |
 | `⌘+` / `⌘-` / `⌘0` | Zoom in / out / actual size |
@@ -284,7 +289,7 @@ to iterate on and has no external moving parts.
 ## Testing
 
 ```sh
-# 323 checks: coordinate maths, zoom anchoring, drag, resize from every border,
+# 330 checks: coordinate maths, zoom anchoring, drag, resize from every border,
 # delete, renaming, workspaces (migration, keep-alive, lazy start, per-workspace
 # viewports, CRUD), persistence round-trip, process launch, session binding, exit
 # behaviour, scroll and zoom-scroll routing, key repeat, switcher ranking, the
@@ -292,8 +297,8 @@ to iterate on and has no external moving parts.
 # snapshot/restore, zoom-vs-resize behaviour, node kinds and legacy decoding, the
 # asset store (dedup, hash naming, pruning), image drop/sizing/aspect-locked
 # resize/drag-to-pi/persistence, label creation/editing/commit/move/resize/
-# rendering/zoom-scaling/persistence and its absence from the switcher, Ghostty
-# config parsing, and three real-PTY tests
+# rendering/zoom-scaling/persistence and its absence from the switcher, the
+# right-click creation menu, Ghostty config parsing, and three real-PTY tests
 ./build/PiCanvas.app/Contents/MacOS/PiCanvas --self-test
 
 # Render a window with two nodes to PNG without a display server

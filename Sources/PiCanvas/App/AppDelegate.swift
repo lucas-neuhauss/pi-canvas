@@ -178,6 +178,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         controller.newNode(kind: .pi)
     }
 
+    @objc private func newTextLabel(_ sender: Any?) {
+        controller.createTextNode(at: controller.canvas.viewportCentreWorldPoint())
+    }
+
+    @objc private func addImage(_ sender: Any?) {
+        controller.chooseImage()
+    }
+
     @objc private func chooseFolder(_ sender: Any?) {
         controller.chooseWorkingDirectory()
     }
@@ -400,6 +408,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         )
         newPiItem.target = self
         fileMenu.addItem(newPiItem)
+
+        fileMenu.addItem(.separator())
+
+        let newLabelItem = NSMenuItem(
+            title: "New Text Label",
+            action: #selector(newTextLabel(_:)),
+            keyEquivalent: "t"
+        )
+        newLabelItem.keyEquivalentModifierMask = [.command, .shift]
+        newLabelItem.target = self
+        fileMenu.addItem(newLabelItem)
+
+        let addImageItem = NSMenuItem(
+            title: "Add Image…",
+            action: #selector(addImage(_:)),
+            keyEquivalent: "i"
+        )
+        addImageItem.keyEquivalentModifierMask = [.command, .shift]
+        addImageItem.target = self
+        fileMenu.addItem(addImageItem)
+
+        fileMenu.addItem(.separator())
 
         let folderItem = NSMenuItem(
             title: "Choose Folder for New Nodes…",
