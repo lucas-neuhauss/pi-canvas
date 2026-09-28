@@ -55,6 +55,20 @@ What maps where:
 | ligatures, `font-thicken` | yes | **no** — SwiftTerm has no equivalent |
 | keybinds, shell integration | yes | no (not applicable) |
 
+## Ending a node
+
+What happens when a process exits depends on how it exited:
+
+| | behaviour |
+| --- | --- |
+| You quit `pi` (`/quit`, ctrl-c, ctrl-d) | the node stays and becomes a plain login shell in the same directory |
+| A shell exits cleanly (`exit`, ctrl-d) | the node closes itself, and its saved scrollback goes with it |
+| A process fails (non-zero, or killed by a signal) | the node stays with `exited 127` / `stopped` in its status pill, so the error is readable |
+| You close it (`×`, `⌘W`) | the node and its process go away |
+
+The first two are complementary: quitting an agent leaves you a usable terminal,
+and leaving that terminal closes the node.
+
 ## Keyboard
 
 | Shortcut | Action |
@@ -71,18 +85,23 @@ What maps where:
 
 Mouse: two-finger scroll pans (content follows your fingers, like any other
 canvas app), pinch zooms, `⌘`+scroll zooms, drag a title bar to move a node,
-drag **any border or corner** to resize (the cursor changes and the grabbed
-border lights up), click `×` or anywhere in a node to focus it and raise it.
+drag **any border or corner** to resize (the cursor changes), click `×` or
+anywhere in a node to focus it and raise it.
+
+Scrolling only reaches a terminal when that node is the focused one. Everywhere
+else it moves the canvas, so scrolling across a wall of terminals never scrolls
+whichever pane happens to be under the pointer.
 
 ## Agent awareness
 
 Each `pi` node is bound to its own session before it launches, by passing
-`pi --session-id <uuid> --name canvas-<dir>-<uuid>`. Two consequences:
+`pi --session-id <uuid>`. Sessions are deliberately left **unnamed**: a name in
+pi's session list is yours to give, and auto-generated ones make the list harder
+to read.
 
 **Restarts do not lose conversations.** Relaunch PiCanvas and each node reopens
 the session it owned, transcript and context intact. Two agents working in the
-same directory stay separate, and `pi -r` lists them under recognisable names.
-Nothing about this requires a wrapper around pi — it is a documented pi flag.
+same directory stay separate.
 
 **A node can tell you what it is doing.** pi writes one JSON object per line to
 its session file as work completes, so the last entry is a precise status
@@ -181,11 +200,11 @@ to iterate on and has no external moving parts.
 ## Testing
 
 ```sh
-# 152 checks: coordinate maths, zoom anchoring, drag, resize from every border,
-# delete, persistence round-trip, process launch, session binding, the agent
-# status state machine, the needs-you indicator and jump, scrollback
-# snapshot/restore, zoom-vs-resize behaviour, Ghostty config parsing, and three
-# real-PTY tests
+# 164 checks: coordinate maths, zoom anchoring, drag, resize from every border,
+# delete, persistence round-trip, process launch, session binding, exit
+# behaviour, scroll routing, the agent status state machine, the needs-you
+# indicator and jump, scrollback snapshot/restore, zoom-vs-resize behaviour,
+# Ghostty config parsing, and three real-PTY tests
 ./build/PiCanvas.app/Contents/MacOS/PiCanvas --self-test
 
 # Render a window with two nodes to PNG without a display server

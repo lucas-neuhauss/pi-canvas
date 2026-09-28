@@ -125,6 +125,7 @@ enum SelfTest {
         testGhosttyConfig(checker: checker)
         testAttentionAndJump(checker: checker)
         testScrollRouting(checker: checker)
+        testExitBehaviour(checker: checker)
         testScrollbackPersistence(checker: checker)
         testTerminalRoundTrip(checker: checker)
         testResizeReflow(checker: checker)
@@ -407,10 +408,9 @@ enum SelfTest {
         checker.check(UUID(uuidString: sessionID) != nil, "session id parses as a UUID")
 
         let command = spec.arguments.last ?? ""
-        checker.check(command.hasPrefix("exec pi "), "the login shell execs pi")
-        checker.check(command.contains("--session-id '\(sessionID)'"), "the session id is passed to pi")
-        checker.check(command.contains("--name '"), "the session is named")
-        checker.check(!command.contains("Project Name"), "session names are sanitised for the shell")
+        checker.check(command.contains("pi --session-id '\(sessionID)'"), "the session id is passed to pi")
+        checker.check(!command.contains("--name"), "pi sessions are left unnamed, since naming them is the user's call")
+        checker.check(command.contains("; exec /bin/zsh -l"), "quitting pi hands the node to a login shell")
 
         let other = ProcessResolver.makeSpec(
             kind: .pi,
@@ -418,14 +418,6 @@ enum SelfTest {
             worldFrame: CGRect(x: 0, y: 0, width: 100, height: 100)
         )
         checker.check(other.sessionID != sessionID, "two agents in one directory get separate sessions")
-
-        let name = ProcessResolver.sessionName(
-            workingDirectory: "/Users/someone/Project Name",
-            sessionID: sessionID
-        )
-        checker.check(name.contains("Project-Name"), "session name keeps a readable directory hint")
-        checker.check(!name.contains(" "), "session name has no spaces")
-        checker.equal(name, ProcessResolver.sessionName(workingDirectory: "/Users/someone/Project Name", sessionID: sessionID), "session name is stable")
 
         // And it must survive a save/load cycle, or restore would start fresh.
         let layoutURL = URL(fileURLWithPath: NSTemporaryDirectory())
@@ -664,6 +656,81 @@ enum SelfTest {
         }
 
         try? FileManager.default.removeItem(at: root)
+    }
+
+    /// Quitting a shell should close its node, but a failure should leave it
+    /// standing so the error is readable. Signals are abnormal too, so they stay.
+    private static func testExitBehaviour(checker: Checker) {
+        print("\nexit behaviour")
+
+        let canvas = CanvasView(frame: CGRect(x: 0, y: 0, width: 1200, height: 800))
+        let window = NSWindow(
+            contentRect: canvas.frame,
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = canvas
+        window.makeKeyAndOrderFront(nil)
+
+        let layoutURL = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("picanvas-exit-\(UUID().uuidString).json")
+        let controller = CanvasController(canvas: canvas, store: LayoutStore(fileURL: layoutURL))
+        let recorder = ContentRecorder()
+        controller.contentFactory = { spec in recorder.make(spec) }
+
+        func startNode() -> (id: UUID, content: RecordingContent)? {
+            controller.newNode(kind: .shell)
+            guard let id = canvas.nodeViews.last?.nodeID, let content = recorder.content(for: id) else { return nil }
+            return (id, content)
+        }
+
+        // A clean exit: the shell said goodbye, so the node goes with it.
+        guard let clean = startNode() else {
+            checker.check(false, "node created")
+            window.close()
+            return
+        }
+        let countBefore = controller.nodeCount
+        clean.content.onExit?(0)
+        checker.check(
+            waitUntil(timeout: 3) { canvas.nodeView(withID: clean.id) == nil },
+            "a clean exit closes its node"
+        )
+        checker.equal(controller.nodeCount, countBefore - 1, "the node is removed from the model too")
+        checker.equal(recorder.content(for: clean.id)?.terminateCount, 1, "the surface is torn down")
+
+        // A failure: stay put with the code visible.
+        guard let failed = startNode() else {
+            checker.check(false, "second node created")
+            window.close()
+            return
+        }
+        failed.content.onExit?(127)
+        _ = waitUntil(timeout: 1) { false }
+        checker.check(canvas.nodeView(withID: failed.id) != nil, "a failed command keeps its node")
+        checker.equal(
+            canvas.nodeView(withID: failed.id)?.statusText,
+            "exited 127",
+            "and reports the exit code"
+        )
+        checker.equal(
+            canvas.nodeView(withID: failed.id)?.statusKind,
+            .failure,
+            "which is flagged as a failure"
+        )
+
+        // A signal is abnormal: keep the node as well.
+        failed.content.onExit?(nil)
+        _ = waitUntil(timeout: 1) { false }
+        checker.check(canvas.nodeView(withID: failed.id) != nil, "a signalled process keeps its node")
+        checker.equal(
+            canvas.nodeView(withID: failed.id)?.statusText,
+            "stopped",
+            "and says it was stopped"
+        )
+
+        window.close()
     }
 
     /// Scrolling must move the canvas, not the terminal under the pointer —

@@ -89,34 +89,27 @@ enum ProcessResolver {
             // resumes exactly that conversation on relaunch (and creates it the
             // first time), so restarting PiCanvas does not throw away the
             // agents' context, and two agents in one directory stay separate.
+            //
+            // No `--name`: a name in pi's session list is the user's to give,
+            // and handing them auto-generated ones makes the list harder to
+            // read than an unnamed session.
             let sessionID = UUID().uuidString.lowercased()
-            let name = sessionName(workingDirectory: directory, sessionID: sessionID)
-            let command = "exec pi --session-id \(shellQuoted(sessionID)) --name \(shellQuoted(name))"
+            let agent = "pi --session-id \(shellQuoted(sessionID))"
+
+            // When pi exits, hand the node over to a normal login shell rather
+            // than leaving a dead pane behind: quitting the agent should leave
+            // you with a usable terminal in the same directory.
+            let command = "\(agent); exec /bin/zsh -l"
+
             return NodeSpec(
                 kind: .pi,
                 worldFrame: worldFrame,
                 workingDirectory: directory,
-                // A login shell resolves `pi` from the user's PATH; `exec` replaces
-                // the shell so the node's process *is* pi, which keeps exit
-                // reporting honest and leaves no stray prompt behind.
                 executable: "/bin/zsh",
                 arguments: ["-lc", command],
                 sessionID: sessionID
             )
         }
-    }
-
-    /// A recognisable session name so `pi -r` lists canvas nodes meaningfully.
-    static func sessionName(workingDirectory: String, sessionID: String) -> String {
-        let base = (workingDirectory as NSString).lastPathComponent
-        let sanitized = base.replacingOccurrences(
-            of: "[^A-Za-z0-9._-]",
-            with: "-",
-            options: .regularExpression
-        )
-        let trimmed = String(sanitized.prefix(24)).trimmingCharacters(in: CharacterSet(charactersIn: ".-"))
-        let suffix = String(sessionID.prefix(8))
-        return trimmed.isEmpty ? "canvas-\(suffix)" : "canvas-\(trimmed)-\(suffix)"
     }
 
     /// Single-quote a value for safe interpolation into a shell command line.

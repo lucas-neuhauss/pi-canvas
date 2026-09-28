@@ -238,9 +238,24 @@ final class CanvasController: NSObject {
             let describing = code.map { "exit \($0)" } ?? "killed by signal"
             let grid = content.reportedGrid
             NSLog("[PiCanvas] node %@ terminated: %@ (grid %dx%d)", id.uuidString, describing, grid.cols, grid.rows)
-            node.statusKind = (code == 0) ? .idle : .failure
-            node.statusText = code.map { $0 == 0 ? "exited" : "exited \($0)" } ?? "stopped"
+
+            // Leaving a shell should leave nothing behind, so a clean exit closes
+            // the node. A failure keeps it so the error stays readable, which is
+            // the whole reason the status pill exists.
+            let exitedCleanly = (code == 0)
+            if !exitedCleanly {
+                node.statusKind = .failure
+                node.statusText = code.map { "exited \($0)" } ?? "stopped"
+            }
             self.onStateChange?()
+
+            if exitedCleanly {
+                // Deferred by a turn: this runs inside the terminal's own exit
+                // callback, and tearing the surface down from there is not safe.
+                DispatchQueue.main.async { [weak self] in
+                    self?.close(nodeID: id)
+                }
+            }
         }
 
         content.onDirectoryChange = { [weak self] directory in
