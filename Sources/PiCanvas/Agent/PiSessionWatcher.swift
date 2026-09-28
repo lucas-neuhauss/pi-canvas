@@ -45,9 +45,10 @@ struct PiUsage: Equatable {
     /// Compact money for a title bar: `$0.0008`, `$0.012`, `$1.24`.
     var costText: String? { PiUsage.formatCost(costUSD) }
 
-    /// Compact money for anywhere: `$0.0008`, `$0.012`, `$1.24`.
+    /// Compact money for anywhere: `$0.0008`, `$0.012`, `$1.24`. Amounts that
+    /// would round to nothing are reported as nothing rather than as "$0.0000".
     static func formatCost(_ usd: Double) -> String? {
-        guard usd > 0 else { return nil }
+        guard usd >= 0.00005 else { return nil }
         if usd < 0.01 { return String(format: "$%.4f", usd) }
         if usd < 1 { return String(format: "$%.3f", usd) }
         return String(format: "$%.2f", usd)

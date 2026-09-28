@@ -169,6 +169,8 @@ final class MainView: NSView {
 
     let canvas: CanvasView
     let statusBar = StatusBarView()
+    /// The node switcher, shown over everything else.
+    let palette = NodePaletteView()
 
     override var isFlipped: Bool { true }
 
@@ -177,6 +179,7 @@ final class MainView: NSView {
         super.init(frame: .zero)
         addSubview(canvas)
         addSubview(statusBar)
+        addSubview(palette)
     }
 
     required init?(coder: NSCoder) {
@@ -193,5 +196,7 @@ final class MainView: NSView {
             width: bounds.width,
             height: barHeight
         )
+        // The switcher covers the whole window, status bar included.
+        palette.frame = bounds
     }
 }

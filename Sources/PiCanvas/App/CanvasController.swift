@@ -33,6 +33,9 @@ final class CanvasController: NSObject {
     /// Token/cost totals per pi node, straight from the transcripts.
     private(set) var agentUsage: [UUID: PiUsage] = [:]
 
+    /// When each node was last focused, so the switcher can put recent ones first.
+    private var focusTimes: [UUID: Date] = [:]
+
     /// Combined spend across every node, for the window title.
     var totalAgentCost: Double {
         agentUsage.values.reduce(0) { $0 + $1.costUSD }
@@ -275,6 +278,7 @@ final class CanvasController: NSObject {
         watchers[nodeID] = nil
         agentsNeedingAttention.removeAll { $0 == nodeID }
         agentUsage[nodeID] = nil
+        focusTimes[nodeID] = nil
         scrollbackStore.remove(for: nodeID)
         contents[nodeID]?.terminate()
         contents[nodeID] = nil
@@ -372,6 +376,30 @@ final class CanvasController: NSObject {
         }
     }
 
+    /// Brings a node into view and gives its terminal focus.
+    func focusNode(id: UUID) {
+        guard let node = canvas.nodeView(withID: id) else { return }
+        reveal(node.worldFrame)
+        canvas.select(node, focusContent: true)
+    }
+
+    /// Everything the node switcher can list.
+    func paletteEntries() -> [NodePaletteEntry] {
+        canvas.orderedNodeIDs.compactMap { id in
+            guard let node = canvas.nodeView(withID: id), let spec = specs[id] else { return nil }
+            return NodePaletteEntry(
+                id: id,
+                kind: spec.kind,
+                title: node.title,
+                subtitle: Self.abbreviate(spec.workingDirectory),
+                status: node.statusText,
+                statusKind: node.statusKind,
+                isAttention: agentsNeedingAttention.contains(id),
+                lastFocused: focusTimes[id]
+            )
+        }
+    }
+
     // MARK: - Navigation
 
     /// Cycles to the next agent that wants a human, revealing it if it is
@@ -461,8 +489,9 @@ extension CanvasController: CanvasViewDelegate {
         for (id, content) in contents {
             content.setFocused(id == nodeID)
         }
-        if let nodeID, let content = contents[nodeID] {
-            content.focus()
+        if let nodeID {
+            focusTimes[nodeID] = Date()
+            contents[nodeID]?.focus()
         }
         onStateChange?()
     }

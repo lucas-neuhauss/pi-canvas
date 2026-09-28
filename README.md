@@ -79,6 +79,7 @@ and leaving that terminal closes the node.
 | `⌘O` | Choose the folder new nodes start in |
 | `⌘+` / `⌘-` / `⌘0` | Zoom in / out / actual size |
 | `⌘9` | Zoom to fit every node |
+| `⌘K` | Go to terminal… — the node switcher |
 | `⌘J` | Jump to the next agent that needs you (pans to it if off-screen) |
 | `Delete` | Close the selected node (when the canvas, not a terminal, has focus) |
 | `⌘C` / `⌘V` / `⌘A` | Copy / paste / select all, routed to the focused terminal |
@@ -103,6 +104,19 @@ focused terminal, because that is exactly when you want to zoom. `⇧`+scroll is
 left to the terminal, which uses it to bypass mouse reporting so you can select
 text. Both zoom modifiers are accepted because conventions differ: browsers,
 Figma and Preview use `⌘`; Photoshop, Sketch and Maestro use `⌥`.
+
+## Switching between nodes
+
+`⌘K` opens a switcher over the canvas. Type to narrow it, `↑`/`↓` (or `⇥`) to
+move, `↵` to go there, `esc` to leave. Rows show the node's title, its directory,
+and its agent status.
+
+It matches the title, the directory and the status, so `need` finds the agents
+waiting for you, `spero` finds everything in that repo, and `pcn` works as
+initials. With nothing typed the order is agents that need you first, then most
+recently focused — so `⌘K` `↵` is a two-keystroke switch back to where you were.
+The first nine rows are numbered: `⌘K` then `3` selects that row directly, and
+typing a digit never filters, so the numbers always mean something.
 
 ## Agent awareness
 
@@ -212,11 +226,12 @@ to iterate on and has no external moving parts.
 ## Testing
 
 ```sh
-# 178 checks: coordinate maths, zoom anchoring, drag, resize from every border,
+# 199 checks: coordinate maths, zoom anchoring, drag, resize from every border,
 # delete, persistence round-trip, process launch, session binding, exit
-# behaviour, scroll and zoom-scroll routing, key repeat, the agent status state
-# machine, the needs-you indicator and jump, scrollback snapshot/restore,
-# zoom-vs-resize behaviour, Ghostty config parsing, and three real-PTY tests
+# behaviour, scroll and zoom-scroll routing, key repeat, switcher ranking, the
+# agent status state machine, the needs-you indicator and jump, scrollback
+# snapshot/restore, zoom-vs-resize behaviour, Ghostty config parsing, and three
+# real-PTY tests
 ./build/PiCanvas.app/Contents/MacOS/PiCanvas --self-test
 
 # Render a window with two nodes to PNG without a display server
@@ -225,8 +240,9 @@ to iterate on and has no external moving parts.
 # Screenshot just the app window (needs Screen Recording permission)
 ./scripts/window-shot.sh /tmp/window.png
 
-# Launch with nodes already open
+# Launch with nodes already open, and with the switcher showing
 ./build/PiCanvas.app/Contents/MacOS/PiCanvas --new-terminal --new-pi
+./build/PiCanvas.app/Contents/MacOS/PiCanvas --show-palette --palette-query=need
 ```
 
 The self-test synthesises real `NSEvent`s to drive the actual drag and resize

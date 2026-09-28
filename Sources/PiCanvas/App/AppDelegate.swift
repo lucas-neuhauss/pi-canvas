@@ -87,14 +87,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     ///
     ///     PiCanvas --new-terminal --new-pi
     private func applyLaunchArguments() {
+        var showPalette = false
+        var paletteQuery: String?
+
         for argument in CommandLine.arguments {
             switch argument {
             case "--new-terminal":
                 controller.newNode(kind: .shell)
             case "--new-pi":
                 controller.newNode(kind: .pi)
+            case "--show-palette":
+                showPalette = true
             default:
+                if argument.hasPrefix("--palette-query=") {
+                    paletteQuery = String(argument.dropFirst("--palette-query=".count))
+                }
                 continue
+            }
+        }
+
+        guard showPalette else { return }
+        // Let the window lay out (and the nodes start) before showing the switcher.
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.showTerminalPalette(nil)
+            if let paletteQuery {
+                self.mainView.palette.setQuery(paletteQuery)
             }
         }
     }
@@ -166,6 +184,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         controller.jumpToNextAgentNeedingAttention()
     }
 
+    /// ⌘K: the keyboard way to move between nodes. Pressing it again closes it.
+    @objc private func showTerminalPalette(_ sender: Any?) {
+        if mainView.palette.isPresenting {
+            mainView.palette.dismiss()
+            return
+        }
+
+        mainView.palette.onSelect = { [weak self] id in
+            self?.controller.focusNode(id: id)
+        }
+        mainView.palette.onDismiss = { [weak self] in
+            self?.restoreTerminalFocus()
+        }
+        mainView.palette.present(entries: controller.paletteEntries(), from: window)
+    }
+
+    /// Handing focus back matters: opening the switcher took it from the terminal.
+    private func restoreTerminalFocus() {
+        if let id = controller.focusedNodeID {
+            controller.focusNode(id: id)
+        } else {
+            window.makeFirstResponder(mainView.canvas)
+        }
+    }
+
     // MARK: - Menu validation
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
@@ -174,6 +217,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             return (controller?.nodeCount ?? 0) > 0
         case #selector(jumpToNextAgent(_:)):
             return !(controller?.agentsNeedingAttention.isEmpty ?? true)
+        case #selector(showTerminalPalette(_:)):
+            return (controller?.nodeCount ?? 0) > 0
         default:
             return true
         }
@@ -295,6 +340,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         let zoomInItem = NSMenuItem(title: "Zoom In", action: #selector(zoomIn(_:)), keyEquivalent: "=")
         zoomInItem.target = self
         viewMenu.addItem(zoomInItem)
+
+        let goToItem = NSMenuItem(
+            title: "Go to Terminal…",
+            action: #selector(showTerminalPalette(_:)),
+            keyEquivalent: "k"
+        )
+        goToItem.target = self
+        viewMenu.addItem(goToItem)
+
+        viewMenu.addItem(.separator())
 
         let zoomOutItem = NSMenuItem(title: "Zoom Out", action: #selector(zoomOut(_:)), keyEquivalent: "-")
         zoomOutItem.target = self

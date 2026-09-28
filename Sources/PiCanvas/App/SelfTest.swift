@@ -128,6 +128,7 @@ enum SelfTest {
         testZoomScrollRouting(checker: checker)
         testExitBehaviour(checker: checker)
         testKeyRepeat(checker: checker)
+        testNodePalette(checker: checker)
         testScrollbackPersistence(checker: checker)
         testTerminalRoundTrip(checker: checker)
         testResizeReflow(checker: checker)
@@ -767,6 +768,110 @@ enum SelfTest {
         checker.check(
             canvas.canvasHandlesScroll(command, at: CGPoint(x: 5, y: 5)),
             "⌘-scroll over empty canvas zooms"
+        )
+
+        window.close()
+    }
+
+    /// The switcher earns its keep in what it shows when you type, so the ranking
+    /// is tested directly, along with the rows the controller builds from nodes.
+    private static func testNodePalette(checker: Checker) {
+        print("\nnode switcher")
+
+        // Matching quality
+        checker.check(
+            NodePaletteRanking.score("pi", in: "pi - canvas") > NodePaletteRanking.score("pi", in: "canvas pi"),
+            "an earlier match scores higher"
+        )
+        checker.equal(NodePaletteRanking.score("zzz", in: "pi - canvas"), 0, "a miss scores zero")
+        checker.check(NodePaletteRanking.score("pcn", in: "pi-canvas") > 0, "subsequences match, so initials work")
+        checker.check(NodePaletteRanking.score("canvas", in: "~/Projects/pi-canvas") > 0, "paths are searchable")
+        checker.check(NodePaletteRanking.score("", in: "anything") > 0, "an empty query matches everything")
+        checker.check(
+            NodePaletteRanking.score("canvas", in: "canvas") > NodePaletteRanking.score("canvas", in: "pi - canvas"),
+            "an exact match beats a substring"
+        )
+
+        // Ordering
+        let waiting = UUID()
+        let recent = UUID()
+        let stale = UUID()
+        let entries = [
+            NodePaletteEntry(
+                id: stale, kind: .shell, title: "Terminal", subtitle: "~/work",
+                status: nil, statusKind: .idle, isAttention: false, lastFocused: nil
+            ),
+            NodePaletteEntry(
+                id: waiting, kind: .pi, title: "π - canvas", subtitle: "~/Projects/pi-canvas",
+                status: "needs you", statusKind: .needsAttention, isAttention: true,
+                lastFocused: Date(timeIntervalSince1970: 100)
+            ),
+            NodePaletteEntry(
+                id: recent, kind: .shell, title: "zsh", subtitle: "~/tmp",
+                status: nil, statusKind: .idle, isAttention: false,
+                lastFocused: Date(timeIntervalSince1970: 500)
+            )
+        ]
+
+        checker.equal(
+            NodePaletteRanking.ranked(entries, query: "").map(\.id),
+            [waiting, recent, stale],
+            "unqueried: agents that need you, then most recently focused"
+        )
+        checker.equal(
+            NodePaletteRanking.ranked(entries, query: "need").first?.id,
+            waiting,
+            "typing a status finds the waiting agent"
+        )
+        checker.equal(
+            NodePaletteRanking.ranked(entries, query: "tmp").first?.id,
+            recent,
+            "the working directory is searchable"
+        )
+        checker.equal(NodePaletteRanking.ranked(entries, query: "zzz").count, 0, "a query with no match shows nothing")
+
+        // The digit shortcut
+        checker.equal(NodePaletteRanking.indexForDigit("2", count: 3), 1, "a digit picks a row by position")
+        checker.check(NodePaletteRanking.indexForDigit("9", count: 3) == nil, "a digit past the end picks nothing")
+        checker.check(NodePaletteRanking.indexForDigit("0", count: 3) == nil, "there is no zeroth row")
+        checker.check(NodePaletteRanking.indexForDigit("ab", count: 3) == nil, "text is not a digit")
+
+        // What the controller actually lists
+        let canvas = CanvasView(frame: CGRect(x: 0, y: 0, width: 1200, height: 800))
+        let window = NSWindow(
+            contentRect: canvas.frame,
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = canvas
+        window.makeKeyAndOrderFront(nil)
+
+        let layoutURL = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("picanvas-palette-\(UUID().uuidString).json")
+        let controller = CanvasController(canvas: canvas, store: LayoutStore(fileURL: layoutURL))
+        controller.contentFactory = { _ in RecordingContent() }
+        controller.newNode(kind: .shell)
+        controller.newNode(kind: .pi)
+
+        let listed = controller.paletteEntries()
+        checker.equal(listed.count, 2, "every node is listed")
+        checker.check(listed.allSatisfy { !$0.title.isEmpty }, "every row has a title")
+        checker.check(listed.allSatisfy { !$0.subtitle.isEmpty }, "every row says where it runs")
+        checker.check(listed.contains { $0.kind == .pi }, "agents are listed alongside terminals")
+        checker.check(listed.contains { $0.kind == .shell }, "terminals are listed too")
+
+        canvas.select(nil, focusContent: false)
+        guard let target = canvas.nodeViews.first else {
+            checker.check(false, "a node exists")
+            window.close()
+            return
+        }
+        controller.focusNode(id: target.nodeID)
+        checker.equal(canvas.focusedNodeID, target.nodeID, "choosing a row focuses that node")
+        checker.check(
+            canvas.visibleWorldRect.intersects(target.worldFrame),
+            "and brings it into view"
         )
 
         window.close()
