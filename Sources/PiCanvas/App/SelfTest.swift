@@ -1266,6 +1266,10 @@ enum SelfTest {
         checker.equal(spec.kind, .browser, "the node is a browser")
         checker.equal(spec.url, fixture.absoluteString, "the URL is on the spec")
         checker.check(
+            (browser.view as? BrowserContentView)?.isInspectable == true,
+            "the page is inspectable from Safari"
+        )
+        checker.check(
             waitUntil(timeout: 10) { browser.pageTitle == "Fixture Page" },
             "the page loads (title \(browser.pageTitle ?? "none"))"
         )

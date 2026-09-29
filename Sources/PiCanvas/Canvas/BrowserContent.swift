@@ -131,6 +131,10 @@ final class BrowserContentView: NSView {
         webView.navigationDelegate = self
         webView.allowsMagnification = false
         webView.allowsBackForwardNavigationGestures = false
+        // Element inspection is delegated to Safari's Web Inspector rather than
+        // grown into the app: setting this lets Safari attach to the page (with
+        // the Develop menu enabled). No devtools UI lives here, on purpose.
+        webView.isInspectable = true
         addSubview(webView)
 
         // The page's own title becomes the node's title.
@@ -155,6 +159,8 @@ final class BrowserContentView: NSView {
 
     var currentURL: URL? { webView.url }
     var pageTitle: String? { webView.title }
+    /// Whether Safari's Web Inspector can attach (for tests).
+    var isInspectable: Bool { webView.isInspectable }
 
     func load(_ url: URL) {
         webView.load(URLRequest(url: url))

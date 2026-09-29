@@ -133,6 +133,10 @@ not kept). The node resizes like any other and the page reflows; dragging the
 grip in the address row onto a pi node types the URL into the agent. Pages that
 need a real browser (video, heavy auth) are allowed to be the wrong tool.
 
+The page is inspectable from **Safari's Develop menu** (web views appear there
+when Safari's developer features are enabled), so debugging stays in the real
+tool instead of becoming app UI.
+
 ## Keyboard
 
 | Shortcut | Action |
