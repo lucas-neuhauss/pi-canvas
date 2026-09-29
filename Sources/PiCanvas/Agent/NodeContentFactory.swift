@@ -44,8 +44,7 @@ enum NodeContentFactory {
             return NoteContent(noteURL: stores.notes.url(for: noteID))
 
         case .browser:
-            // The seam is ready for this; the content is not built yet.
-            return MissingNodeContent(message: "\(spec.kind.displayName) nodes are not implemented yet")
+            return BrowserContent(nodeID: spec.id, url: spec.url.flatMap(URL.init(string:)))
         }
     }
 }

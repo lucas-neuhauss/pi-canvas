@@ -23,6 +23,8 @@ protocol CanvasViewDelegate: AnyObject {
     func canvasView(_ canvas: CanvasView, didRename nodeID: UUID, to title: String)
     /// An image file was dropped on the canvas. Returns true when a node was made.
     func canvasView(_ canvas: CanvasView, didReceiveImageDropOf url: URL, atWorldPoint point: CGPoint) -> Bool
+    /// A web link was dropped on the canvas. Returns true when a node was made.
+    func canvasView(_ canvas: CanvasView, didReceiveLinkDropOf url: URL, atWorldPoint point: CGPoint) -> Bool
     /// A double-click landed on empty canvas: make a text label there.
     func canvasView(_ canvas: CanvasView, didRequestTextNodeAt point: CGPoint)
     /// A context-menu request to create a node at a world point.
@@ -77,8 +79,8 @@ final class CanvasView: NSView {
         super.init(frame: frameRect)
         wantsLayer = true
         layer?.backgroundColor = backgroundColor.cgColor
-        // Dropping an image file anywhere on the plane makes an image node.
-        registerForDraggedTypes([.fileURL])
+        // Dropping an image file or a link anywhere on the plane makes a node.
+        registerForDraggedTypes([.fileURL, .URL])
     }
 
     required init?(coder: NSCoder) {
@@ -298,16 +300,41 @@ final class CanvasView: NSView {
         return canvasDelegate?.canvasView(self, didReceiveImageDropOf: url, atWorldPoint: world) ?? false
     }
 
+    /// The first dropped item that is a web link, if any. A file URL (an image
+    /// from Finder) never matches.
+    func droppedWebURL(from pasteboard: NSPasteboard) -> URL? {
+        let urls = pasteboard.readObjects(forClasses: [NSURL.self], options: nil) ?? []
+        return urls.compactMap { $0 as? URL }.first { url in
+            guard let scheme = url.scheme?.lowercased() else { return false }
+            return (scheme == "http" || scheme == "https") && url.host != nil
+        }
+    }
+
+    /// Creates a browser node for a link dropped at a canvas point.
+    @discardableResult
+    func handleWebURLDrop(pasteboard: NSPasteboard, canvasPoint: CGPoint) -> Bool {
+        guard let url = droppedWebURL(from: pasteboard) else { return false }
+        let world = worldPoint(fromScreen: canvasPoint)
+        return canvasDelegate?.canvasView(self, didReceiveLinkDropOf: url, atWorldPoint: world) ?? false
+    }
+
+    private func acceptsCanvasDrop(from pasteboard: NSPasteboard) -> Bool {
+        droppedWebURL(from: pasteboard) != nil || droppedImageURL(from: pasteboard) != nil
+    }
+
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
-        droppedImageURL(from: sender.draggingPasteboard) == nil ? [] : .copy
+        acceptsCanvasDrop(from: sender.draggingPasteboard) ? .copy : []
     }
 
     override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
-        droppedImageURL(from: sender.draggingPasteboard) == nil ? [] : .copy
+        acceptsCanvasDrop(from: sender.draggingPasteboard) ? .copy : []
     }
 
     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
         let point = convert(sender.draggingLocation, from: nil)
+        if handleWebURLDrop(pasteboard: sender.draggingPasteboard, canvasPoint: point) {
+            return true
+        }
         return handleImageDrop(pasteboard: sender.draggingPasteboard, canvasPoint: point)
     }
 
@@ -330,6 +357,7 @@ final class CanvasView: NSView {
         menu.addItem(.separator())
         menu.addItem(contextItem("New Text Label", #selector(contextNewTextLabel(_:))))
         menu.addItem(contextItem("New Note", #selector(contextNewNote(_:))))
+        menu.addItem(contextItem("New Browser", #selector(contextNewBrowser(_:))))
         menu.addItem(contextItem("Add Image…", #selector(contextAddImage(_:))))
         return menu
     }
@@ -354,6 +382,10 @@ final class CanvasView: NSView {
 
     @objc private func contextNewNote(_ sender: Any?) {
         canvasDelegate?.canvasView(self, didRequestNewNodeOfKind: .note, at: contextMenuWorldPoint)
+    }
+
+    @objc private func contextNewBrowser(_ sender: Any?) {
+        canvasDelegate?.canvasView(self, didRequestNewNodeOfKind: .browser, at: contextMenuWorldPoint)
     }
 
     @objc private func contextAddImage(_ sender: Any?) {
