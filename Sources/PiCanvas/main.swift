@@ -39,6 +39,24 @@ MainActor.assumeIsolated {
         application.terminate(nil)
     }
 
+    // A note node with representative markdown, for judging the preview and the
+    // Write mode visually. `--render-note <path.png> [--zoom 2] [--write]`
+    if let flagIndex = arguments.firstIndex(of: "--render-note") {
+        let path = arguments.count > flagIndex + 1 ? arguments[flagIndex + 1] : "/tmp/picanvas-note.png"
+        var zoom: CGFloat = 1
+        if let zoomIndex = arguments.firstIndex(of: "--zoom"), arguments.count > zoomIndex + 1 {
+            zoom = CGFloat(Double(arguments[zoomIndex + 1]) ?? 1)
+        }
+        let application = NSApplication.shared
+        application.setActivationPolicy(.accessory)
+        PreviewHarness.runNote(
+            outputPath: path,
+            zoom: zoom,
+            showPreview: !arguments.contains("--write")
+        )
+        application.terminate(nil)
+    }
+
     let application = NSApplication.shared
     let delegate = AppDelegate()
     application.delegate = delegate

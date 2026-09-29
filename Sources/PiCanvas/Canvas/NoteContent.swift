@@ -144,14 +144,22 @@ final class NoteContentView: NSView {
     private enum Mode: Int {
         case write = 0
         case preview = 1
+
+        var title: String {
+            switch self {
+            case .write: return "Write"
+            case .preview: return "Preview"
+            }
+        }
     }
 
-    private let segmented: NSSegmentedControl
     private let scrollView = NSScrollView()
     private let editor = NSTextView()
     private let preview = NSTextView()
     private var mode: Mode = .write
     private var scale: CGFloat = 1
+    /// The Write / Preview click targets, rebuilt on every layout.
+    private var toggleTargets: [(mode: Mode, rect: CGRect)] = []
 
     /// Fired on every keystroke in write mode.
     var onTextEdit: ((String) -> Void)?
@@ -161,17 +169,10 @@ final class NoteContentView: NSView {
     override var isFlipped: Bool { true }
 
     init(text: String) {
-        segmented = NSSegmentedControl(labels: ["Write", "Preview"], trackingMode: .selectOne, target: nil, action: nil)
         super.init(frame: .zero)
 
         wantsLayer = true
         layer?.backgroundColor = NSColor(srgbRed: 0.055, green: 0.058, blue: 0.066, alpha: 1).cgColor
-
-        segmented.target = self
-        segmented.action = #selector(modeChanged)
-        segmented.controlSize = .small
-        segmented.selectedSegment = Mode.write.rawValue
-        addSubview(segmented)
 
         // The editor: plain markdown, monospaced, wrapping.
         editor.string = text
@@ -242,7 +243,6 @@ final class NoteContentView: NSView {
         // typing into a hidden editor would be invisible but real.
         let wasFocused = window?.firstResponder === editor || window?.firstResponder === preview
         mode = newMode
-        segmented.selectedSegment = newMode.rawValue
         if mode == .preview {
             renderPreview()
             scrollView.documentView = preview
@@ -251,6 +251,8 @@ final class NoteContentView: NSView {
         }
         if wasFocused { focusActiveView() }
         needsLayout = true
+        needsDisplay = true
+        window?.invalidateCursorRects(for: self)
     }
 
     func focusActiveView() {
@@ -263,37 +265,93 @@ final class NoteContentView: NSView {
 
     func setScale(_ scale: CGFloat) {
         self.scale = scale
-        let chromeScale = CanvasView.chromeScale(forZoom: scale)
         let editorSize = min(max(NoteContent.editorFontSize * scale, 4), 30)
         editor.font = NSFont.monospacedSystemFont(ofSize: editorSize, weight: .regular)
-        segmented.font = NSFont.systemFont(ofSize: 10 * chromeScale, weight: .medium)
         if mode == .preview {
             renderPreview()
         }
         needsLayout = true
+        needsDisplay = true
+        window?.invalidateCursorRects(for: self)
     }
+
+    private var chromeScale: CGFloat { CanvasView.chromeScale(forZoom: scale) }
+    private var headerHeight: CGFloat { max(26 * chromeScale, 24) }
+    private var toggleFont: NSFont { NSFont.systemFont(ofSize: max(10.5 * chromeScale, 9), weight: .medium) }
 
     override func layout() {
         super.layout()
-        let chromeScale = CanvasView.chromeScale(forZoom: scale)
-        let headerHeight = 26 * chromeScale
-        segmented.sizeToFit()
-        segmented.frame = CGRect(
-            x: 8 * chromeScale,
-            y: (headerHeight - segmented.frame.height) / 2,
-            width: segmented.frame.width,
-            height: segmented.frame.height
-        )
+        let header = headerHeight
+        let font = toggleFont
+        let height = max(18 * chromeScale, 16)
+        var x = 8 * chromeScale
+        toggleTargets = []
+        for mode in [Mode.write, .preview] {
+            let title = mode.title as NSString
+            let width = title.size(withAttributes: [.font: font]).width + 20 * chromeScale
+            toggleTargets.append((
+                mode,
+                CGRect(x: x, y: (header - height) / 2, width: width, height: height).integral
+            ))
+            x += width + 2 * chromeScale
+        }
         scrollView.frame = CGRect(
             x: 0,
-            y: headerHeight,
+            y: header,
             width: bounds.width,
-            height: max(bounds.height - headerHeight, 0)
+            height: max(bounds.height - header, 0)
         )
     }
 
-    @objc private func modeChanged(_ sender: Any?) {
-        setPreviewing(segmented.selectedSegment == Mode.preview.rawValue)
+    /// A flat toggle drawn like the rest of the chrome, so it tracks zoom with
+    /// the title bar instead of fighting it.
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        for target in toggleTargets {
+            let selected = target.mode == mode
+            if selected {
+                NSColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.10).setFill()
+                NSBezierPath(
+                    roundedRect: target.rect,
+                    xRadius: target.rect.height / 2,
+                    yRadius: target.rect.height / 2
+                ).fill()
+            }
+            let paragraph = NSMutableParagraphStyle()
+            paragraph.alignment = .center
+            let attributes: [NSAttributedString.Key: Any] = [
+                .font: toggleFont,
+                .foregroundColor: NSColor(srgbRed: 1, green: 1, blue: 1, alpha: selected ? 0.92 : 0.45),
+                .paragraphStyle: paragraph
+            ]
+            let title = target.mode.title as NSString
+            let size = title.size(withAttributes: attributes)
+            title.draw(
+                in: CGRect(
+                    x: target.rect.minX,
+                    y: target.rect.midY - size.height / 2,
+                    width: target.rect.width,
+                    height: size.height
+                ),
+                withAttributes: attributes
+            )
+        }
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        for target in toggleTargets where target.rect.contains(point) {
+            setPreviewing(target.mode == .preview)
+            return
+        }
+        super.mouseDown(with: event)
+    }
+
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        for target in toggleTargets {
+            addCursorRect(target.rect, cursor: .pointingHand)
+        }
     }
 
     private func renderPreview() {
@@ -302,10 +360,10 @@ final class NoteContentView: NSView {
             editor.string,
             baseFontSize: previewSize,
             textColor: NSColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.92),
-            secondaryColor: NSColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.6),
+            secondaryColor: NSColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.62),
             linkColor: NSColor(srgbRed: 0.45, green: 0.68, blue: 1.0, alpha: 1),
             codeColor: NSColor(srgbRed: 0.88, green: 0.76, blue: 0.52, alpha: 1),
-            codeBackground: NSColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.07)
+            codeBackground: NSColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.06)
         )
         preview.textStorage?.setAttributedString(rendered)
     }

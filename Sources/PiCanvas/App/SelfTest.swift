@@ -1060,8 +1060,11 @@ enum SelfTest {
         let body = """
         # Plan
 
+        Bold **bolder** and *slanted* text.
+
         - wire the preview
-        - save as you type
+        - [ ] pending task
+        - [x] finished task
 
         See [the docs](https://example.com/docs).
         """
@@ -1085,6 +1088,37 @@ enum SelfTest {
             checker.check(false, "the preview shows the heading")
         }
         checker.check(renderedText.contains("\u{2022}"), "the preview shows list bullets")
+        checker.check(renderedText.contains("\u{2610}"), "task lists render as checkboxes")
+        checker.check(renderedText.contains("\u{2611}"), "checked tasks render as checked boxes")
+        if let bold = renderedText.range(of: "bolder") {
+            let index = renderedText.distance(from: renderedText.startIndex, to: bold.lowerBound)
+            let font = rendered.attribute(.font, at: index, effectiveRange: nil) as? NSFont
+            checker.check(
+                font?.fontDescriptor.symbolicTraits.contains(.bold) == true,
+                "bold markdown renders in a bold face"
+            )
+        } else {
+            checker.check(false, "the preview shows the bold run")
+        }
+        if let italic = renderedText.range(of: "slanted") {
+            let index = renderedText.distance(from: renderedText.startIndex, to: italic.lowerBound)
+            let font = rendered.attribute(.font, at: index, effectiveRange: nil) as? NSFont
+            checker.check(
+                font?.fontDescriptor.symbolicTraits.contains(.italic) == true,
+                "italic markdown renders in an italic face"
+            )
+        } else {
+            checker.check(false, "the preview shows the italic run")
+        }
+        if let checked = renderedText.range(of: "finished task") {
+            let index = renderedText.distance(from: renderedText.startIndex, to: checked.lowerBound)
+            checker.check(
+                rendered.attribute(.strikethroughStyle, at: index, effectiveRange: nil) != nil,
+                "a checked task is struck through"
+            )
+        } else {
+            checker.check(false, "the preview shows the checked task")
+        }
         if let link = renderedText.range(of: "the docs") {
             let index = renderedText.distance(from: renderedText.startIndex, to: link.lowerBound)
             let url = rendered.attribute(.link, at: index, effectiveRange: nil) as? URL
