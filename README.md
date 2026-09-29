@@ -304,7 +304,7 @@ to iterate on and has no external moving parts.
 ## Testing
 
 ```sh
-# 354 checks: coordinate maths, zoom anchoring, drag, resize from every border,
+# 359 checks: coordinate maths, zoom anchoring, drag, resize from every border,
 # delete, renaming, workspaces (migration, keep-alive, lazy start, per-workspace
 # viewports, CRUD), persistence round-trip, process launch, session binding, exit
 # behaviour, scroll and zoom-scroll routing, key repeat, switcher ranking, the
@@ -313,12 +313,18 @@ to iterate on and has no external moving parts.
 # asset store (dedup, hash naming, pruning), image drop/sizing/aspect-locked
 # resize/drag-to-pi/persistence, label creation/editing/commit/move/resize/
 # rendering/zoom-scaling/persistence and its absence from the switcher, note
-# creation/autosave/markdown preview/workspace isolation/restart, the right-click
-# creation menu, Ghostty config parsing, and three real-PTY tests
+# creation/autosave/markdown preview (headings, emphasis, task lists, links)/
+# workspace isolation/restart, the right-click creation menu, Ghostty config
+# parsing, and three real-PTY tests
 ./build/PiCanvas.app/Contents/MacOS/PiCanvas --self-test
 
 # Render a window with two nodes to PNG without a display server
 ./build/PiCanvas.app/Contents/MacOS/PiCanvas --render-preview /tmp/preview.png
+
+# Render a note node to PNG: markdown preview, or --write for the editor;
+# --zoom adjusts the canvas zoom
+./build/PiCanvas.app/Contents/MacOS/PiCanvas --render-note /tmp/note.png
+./build/PiCanvas.app/Contents/MacOS/PiCanvas --render-note /tmp/note.png --write --zoom 1.7
 
 # Screenshot just the app window (needs Screen Recording permission)
 ./scripts/window-shot.sh /tmp/window.png

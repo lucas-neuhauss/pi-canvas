@@ -90,6 +90,90 @@ enum PreviewHarness {
         exit(wroteSomething ? 0 : 1)
     }
 
+    /// A note node with representative markdown, for judging the preview and the
+    /// Write mode without a human.
+    ///
+    ///     PiCanvas --render-note <path.png> [--zoom 2] [--write]
+    @MainActor
+    static func runNote(outputPath: String, zoom: CGFloat = 1, showPreview: Bool = true, settleSeconds: Double = 1.0) {
+        let canvasFrame = CGRect(x: 0, y: 0, width: 900, height: 700)
+        let canvas = CanvasView(frame: canvasFrame)
+        let main = MainView(canvas: canvas)
+        main.frame = CGRect(x: 0, y: 0, width: canvasFrame.width, height: canvasFrame.height + MainView.statusBarHeight)
+
+        let window = NSWindow(contentRect: main.frame, styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+        window.appearance = NSAppearance(named: .darkAqua)
+        window.isReleasedWhenClosed = false
+        window.contentView = main
+        window.makeKeyAndOrderFront(nil)
+
+        let base = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("picanvas-note-shot-\(UUID().uuidString)")
+        let controller = CanvasController(
+            canvas: canvas,
+            workspaceStore: WorkspaceStore(
+                directory: base.appendingPathComponent("ws"),
+                legacyLayoutURL: base.appendingPathComponent("layout.json")
+            ),
+            scrollbackStore: ScrollbackStore(directory: base.appendingPathComponent("scrollback")),
+            assetStore: AssetStore(directory: base.appendingPathComponent("assets")),
+            noteStore: NoteStore(directory: base.appendingPathComponent("notes"))
+        )
+        var contents: [UUID: NodeContent] = [:]
+        controller.contentFactory = { spec, stores in
+            let content = NodeContentFactory.make(spec: spec, stores: stores)
+            contents[spec.id] = content
+            return content
+        }
+
+        let sample = """
+        # Plan
+
+        Bold **bolder** here, italic *slanted* here, and `code`.
+
+        - [ ] unchecked task
+        - [x] checked task
+        - plain bullet
+
+        1. first
+        2. second
+
+        > quoted text
+
+        ```swift
+        let x = 1
+        ```
+
+        ## Second heading
+        """
+        let id = controller.createNoteNode(text: sample)
+        if showPreview {
+            (contents[id] as? NoteContent)?.setPreviewing(true)
+        }
+        canvas.setViewport(zoom: zoom, pan: .zero, notify: false)
+        if let node = canvas.nodeView(withID: id) {
+            node.worldFrame = CGRect(x: 20, y: 20, width: 560, height: 640)
+            canvas.layoutNodes()
+        }
+
+        main.layoutSubtreeIfNeeded()
+        RunLoop.current.run(until: Date().addingTimeInterval(settleSeconds))
+        main.layoutSubtreeIfNeeded()
+        main.displayIfNeeded()
+
+        if let rep = main.bitmapImageRepForCachingDisplay(in: main.bounds) {
+            main.cacheDisplay(in: main.bounds, to: rep)
+            if let data = rep.representation(using: .png, properties: [:]) {
+                _ = write(data, to: outputPath)
+            }
+        }
+        if let layerPNG = renderLayer(main, scale: 2) {
+            _ = write(layerPNG, to: outputPath + ".layer.png")
+        }
+        FileHandle.standardError.write(Data("note preview: capture ok".utf8))
+        exit(0)
+    }
+
     @MainActor
     private static func renderLayer(_ view: NSView, scale: CGFloat) -> Data? {
         let width = Int(view.bounds.width * scale)
