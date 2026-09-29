@@ -1220,6 +1220,10 @@ enum SelfTest {
             "an explicit scheme is kept"
         )
         checker.check(BrowserContent.normalizedURL(from: "   ") == nil, "an empty address is not a URL")
+        checker.check(BrowserContent.isLocalHost("publisher.hcos.test"), "a .test host is local")
+        checker.check(BrowserContent.isLocalHost("localhost:3000"), "localhost with a port is local")
+        checker.check(BrowserContent.isLocalHost("192.168.1.20"), "a private address is local")
+        checker.check(!BrowserContent.isLocalHost("example.com"), "a public host is not local")
 
         let canvasFrame = CGRect(x: 0, y: 0, width: 1400, height: 900)
         let canvas = CanvasView(frame: canvasFrame)

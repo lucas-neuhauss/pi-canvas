@@ -71,12 +71,33 @@ final class BrowserContent: NodeContent {
         return URL(string: "\(isLocalHost(host) ? "http" : "https")://\(trimmed)")
     }
 
-    private static func isLocalHost(_ host: String) -> Bool {
-        let name = host.split(separator: ":").first.map(String.init)?.lowercased() ?? host.lowercased()
-        if name == "localhost" || name == "127.0.0.1" || name == "0.0.0.0" || name == "::1" {
+    /// Whether a host is a local development host: loopback, a private address,
+    /// an unqualified name, or one of the reserved development TLDs. Used for
+    /// address normalisation and to decide whose self-signed certificates a
+    /// browser node may accept.
+    static func isLocalHost(_ host: String) -> Bool {
+        var name = host.lowercased()
+        if name.hasPrefix("[") { name.removeFirst() }
+        if let close = name.firstIndex(of: "]") { name = String(name[..<close]) }
+        if name == "::1" { return true }
+        name = String(name.split(separator: ":").first ?? "")
+        guard !name.isEmpty else { return false }
+        if name == "localhost" || name == "127.0.0.1" || name == "0.0.0.0" { return true }
+        if !name.contains(".") { return true }
+        let suffixes = [".local", ".localhost", ".test", ".internal", ".lan", ".home.arpa", ".loc"]
+        if suffixes.contains(where: { name.hasSuffix($0) }) { return true }
+        return isPrivateIPv4(name)
+    }
+
+    private static func isPrivateIPv4(_ name: String) -> Bool {
+        let parts = name.split(separator: ".").compactMap { Int($0) }
+        guard parts.count == 4, parts.allSatisfy({ (0...255).contains($0) }) else { return false }
+        switch (parts[0], parts[1]) {
+        case (10, _), (172, 16...31), (192, 168), (169, 254):
             return true
+        default:
+            return false
         }
-        return name.hasSuffix(".local") || name.hasSuffix(".test")
     }
 }
 
@@ -274,6 +295,24 @@ extension BrowserContentView: WKNavigationDelegate {
 
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
         updateNavigationState()
+    }
+
+    /// Local dev servers routinely serve self-signed certificates. Accept those
+    /// for local hosts only; public hosts keep the default evaluation, so an
+    /// invalid certificate there still fails.
+    func webView(
+        _ webView: WKWebView,
+        didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
+        guard challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
+              BrowserContent.isLocalHost(challenge.protectionSpace.host),
+              let trust = challenge.protectionSpace.serverTrust else {
+            completionHandler(.performDefaultHandling, nil)
+            return
+        }
+        NSLog("[PiCanvas] accepting the local certificate for %@", challenge.protectionSpace.host)
+        completionHandler(.useCredential, URLCredential(trust: trust))
     }
 
     func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
