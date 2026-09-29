@@ -123,6 +123,16 @@ emphasis, code spans and clickable links), and the first heading names the node.
 Notes live in the workspace they were made in; two workspaces can each hold
 notes without touching each other's.
 
+## Browsers
+
+`⌘⇧B` makes a browser node, or drop a link from your browser onto the canvas.
+It is deliberately not a browser: one page, an address row with back, forward,
+reload and the URL, and nothing else — no tabs, bookmarks, history or downloads.
+The URL is the whole state, so a relaunch reloads the page (scroll position is
+not kept). The node resizes like any other and the page reflows; dragging the
+grip in the address row onto a pi node types the URL into the agent. Pages that
+need a real browser (video, heavy auth) are allowed to be the wrong tool.
+
 ## Keyboard
 
 | Shortcut | Action |
@@ -131,6 +141,7 @@ notes without touching each other's.
 | `⌘P` | New `pi` agent on the canvas |
 | `⌘N` | New markdown note on the canvas |
 | `⇧⌘T` | New text label on the canvas |
+| `⇧⌘B` | New browser node on the canvas |
 | `⇧⌘I` | Add an image (or drop one from Finder) |
 | `⌘W` | Close the focused node (falls back to closing the window) |
 | `⌘O` | Choose the folder new nodes start in |
@@ -259,6 +270,7 @@ Sources/PiCanvas/
     TextContent.swift           label node: in-place editing, font follows zoom
     NoteContent.swift           note node: markdown editor + native preview
     MarkdownPreview.swift       presentation intents → fonts, lists, links
+    BrowserContent.swift        browser node: address row + WKWebView
   Model/
     AgentModel.swift            NodeSpec / LayoutFile / NodeKind
     LayoutStore.swift           debounced atomic JSON persistence
@@ -304,7 +316,7 @@ to iterate on and has no external moving parts.
 ## Testing
 
 ```sh
-# 359 checks: coordinate maths, zoom anchoring, drag, resize from every border,
+# 377 checks: coordinate maths, zoom anchoring, drag, resize from every border,
 # delete, renaming, workspaces (migration, keep-alive, lazy start, per-workspace
 # viewports, CRUD), persistence round-trip, process launch, session binding, exit
 # behaviour, scroll and zoom-scroll routing, key repeat, switcher ranking, the
@@ -314,8 +326,9 @@ to iterate on and has no external moving parts.
 # resize/drag-to-pi/persistence, label creation/editing/commit/move/resize/
 # rendering/zoom-scaling/persistence and its absence from the switcher, note
 # creation/autosave/markdown preview (headings, emphasis, task lists, links)/
-# workspace isolation/restart, the right-click creation menu, Ghostty config
-# parsing, and three real-PTY tests
+# workspace isolation/restart, browser address parsing/loading/persistence/
+# drag-to-pi/link drops, the right-click creation menu, Ghostty config parsing,
+# and three real-PTY tests
 ./build/PiCanvas.app/Contents/MacOS/PiCanvas --self-test
 
 # Render a window with two nodes to PNG without a display server
@@ -325,6 +338,9 @@ to iterate on and has no external moving parts.
 # --zoom adjusts the canvas zoom
 ./build/PiCanvas.app/Contents/MacOS/PiCanvas --render-note /tmp/note.png
 ./build/PiCanvas.app/Contents/MacOS/PiCanvas --render-note /tmp/note.png --write --zoom 1.7
+
+# Render a browser node (data-URL page, no network needed) to PNG
+./build/PiCanvas.app/Contents/MacOS/PiCanvas --render-browser /tmp/browser.png
 
 # Screenshot just the app window (needs Screen Recording permission)
 ./scripts/window-shot.sh /tmp/window.png
@@ -393,12 +409,6 @@ PiCanvas is force-quit, the child processes die with the pty.
 
 ## Not built yet
 
-- More node kinds, tracked as an issue:
-  [#4 browser](https://github.com/lucas-neuhauss/pi-canvas/issues/4) — it builds
-  on the content seam that
-  [#1 image nodes](https://github.com/lucas-neuhauss/pi-canvas/issues/1),
-  [#2 text labels](https://github.com/lucas-neuhauss/pi-canvas/issues/2) and
-  [#3 notes](https://github.com/lucas-neuhauss/pi-canvas/issues/3) introduced
 - Cost and token history over time (the transcript already carries `usage`; only
   the current totals are shown)
 - Node connections, drag-to-snap, a minimap

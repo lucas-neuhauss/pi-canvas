@@ -182,6 +182,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         controller.createNoteNode()
     }
 
+    @objc private func newBrowser(_ sender: Any?) {
+        controller.createBrowserNode()
+    }
+
     @objc private func newTextLabel(_ sender: Any?) {
         controller.createTextNode(at: controller.canvas.viewportCentreWorldPoint())
     }
@@ -431,6 +435,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         newLabelItem.keyEquivalentModifierMask = [.command, .shift]
         newLabelItem.target = self
         fileMenu.addItem(newLabelItem)
+
+        let newBrowserItem = NSMenuItem(
+            title: "New Browser",
+            action: #selector(newBrowser(_:)),
+            keyEquivalent: "b"
+        )
+        newBrowserItem.keyEquivalentModifierMask = [.command, .shift]
+        newBrowserItem.target = self
+        fileMenu.addItem(newBrowserItem)
 
         let addImageItem = NSMenuItem(
             title: "Add Image…",

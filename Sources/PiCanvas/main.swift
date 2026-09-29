@@ -57,6 +57,20 @@ MainActor.assumeIsolated {
         application.terminate(nil)
     }
 
+    // A browser node with a data-URL page, for judging its chrome visually.
+    // `--render-browser <path.png> [--zoom 2]`
+    if let flagIndex = arguments.firstIndex(of: "--render-browser") {
+        let path = arguments.count > flagIndex + 1 ? arguments[flagIndex + 1] : "/tmp/picanvas-browser.png"
+        var zoom: CGFloat = 1
+        if let zoomIndex = arguments.firstIndex(of: "--zoom"), arguments.count > zoomIndex + 1 {
+            zoom = CGFloat(Double(arguments[zoomIndex + 1]) ?? 1)
+        }
+        let application = NSApplication.shared
+        application.setActivationPolicy(.accessory)
+        PreviewHarness.runBrowser(outputPath: path, zoom: zoom)
+        application.terminate(nil)
+    }
+
     let application = NSApplication.shared
     let delegate = AppDelegate()
     application.delegate = delegate

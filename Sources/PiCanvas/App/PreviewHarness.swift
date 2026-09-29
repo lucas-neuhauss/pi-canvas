@@ -174,6 +174,72 @@ enum PreviewHarness {
         exit(0)
     }
 
+    /// A browser node with a data-URL page, for judging the address row and web
+    /// view without a network.
+    ///
+    ///     PiCanvas --render-browser <path.png> [--zoom 2]
+    @MainActor
+    static func runBrowser(outputPath: String, zoom: CGFloat = 1, settleSeconds: Double = 1.5) {
+        let canvasFrame = CGRect(x: 0, y: 0, width: 900, height: 720)
+        let canvas = CanvasView(frame: canvasFrame)
+        let main = MainView(canvas: canvas)
+        main.frame = CGRect(x: 0, y: 0, width: canvasFrame.width, height: canvasFrame.height + MainView.statusBarHeight)
+
+        let window = NSWindow(contentRect: main.frame, styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+        window.appearance = NSAppearance(named: .darkAqua)
+        window.isReleasedWhenClosed = false
+        window.contentView = main
+        window.makeKeyAndOrderFront(nil)
+
+        let base = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("picanvas-browser-shot-\(UUID().uuidString)")
+        let controller = CanvasController(
+            canvas: canvas,
+            workspaceStore: WorkspaceStore(
+                directory: base.appendingPathComponent("ws"),
+                legacyLayoutURL: base.appendingPathComponent("layout.json")
+            ),
+            scrollbackStore: ScrollbackStore(directory: base.appendingPathComponent("scrollback")),
+            assetStore: AssetStore(directory: base.appendingPathComponent("assets")),
+            noteStore: NoteStore(directory: base.appendingPathComponent("notes"))
+        )
+        controller.contentFactory = { spec, stores in
+            NodeContentFactory.make(spec: spec, stores: stores)
+        }
+
+        let html = """
+        <html><body style="background:%231b1e24;color:%23e8eaf0;font-family:-apple-system;padding:28px">
+        <h1 style="margin:0 0 10px">Docs</h1>
+        <p>A page living next to the agents working on it.</p>
+        <pre style="background:%23111;padding:12px;border-radius:6px">npm run dev</pre>
+        </body></html>
+        """
+        let encoded = html.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? ""
+        let id = controller.createBrowserNode(url: URL(string: "data:text/html;charset=utf-8,\(encoded)"))
+        canvas.setViewport(zoom: zoom, pan: .zero, notify: false)
+        if let node = canvas.nodeView(withID: id) {
+            node.worldFrame = CGRect(x: 20, y: 20, width: 700, height: 600)
+            canvas.layoutNodes()
+        }
+
+        main.layoutSubtreeIfNeeded()
+        RunLoop.current.run(until: Date().addingTimeInterval(settleSeconds))
+        main.layoutSubtreeIfNeeded()
+        main.displayIfNeeded()
+
+        if let rep = main.bitmapImageRepForCachingDisplay(in: main.bounds) {
+            main.cacheDisplay(in: main.bounds, to: rep)
+            if let data = rep.representation(using: .png, properties: [:]) {
+                _ = write(data, to: outputPath)
+            }
+        }
+        if let layerPNG = renderLayer(main, scale: 2) {
+            _ = write(layerPNG, to: outputPath + ".layer.png")
+        }
+        FileHandle.standardError.write(Data("browser preview: capture ok".utf8))
+        exit(0)
+    }
+
     @MainActor
     private static func renderLayer(_ view: NSView, scale: CGFloat) -> Data? {
         let width = Int(view.bounds.width * scale)

@@ -9,6 +9,8 @@ final class CanvasController: NSObject {
     static let defaultNodeSize = CGSize(width: 720, height: 440)
     /// Notes start as a page, not a terminal pane.
     static let defaultNoteNodeSize = CGSize(width: 460, height: 320)
+    /// Browsers want room: a page is not a terminal pane either.
+    static let defaultBrowserNodeSize = CGSize(width: 760, height: 540)
     /// Labels start as a short line, not a terminal pane.
     static let defaultTextNodeSize = CGSize(width: 280, height: 64)
 
@@ -625,6 +627,35 @@ final class CanvasController: NSObject {
         return spec.id
     }
 
+    // MARK: - Browser nodes
+
+    /// Creates a browser node. With a URL it opens the page; without one the
+    /// address field takes the keyboard, ready to type into.
+    @discardableResult
+    func createBrowserNode(url: URL? = nil, at worldPoint: CGPoint? = nil) -> UUID {
+        let size = CanvasController.defaultBrowserNodeSize
+        let centre = worldPoint ?? canvas.viewportCentreWorldPoint()
+        let origin = CGPoint(
+            x: (centre.x - size.width / 2).rounded(),
+            y: (centre.y - size.height / 2).rounded()
+        )
+        let spec = NodeSpec(
+            kind: .browser,
+            worldFrame: CGRect(origin: origin, size: size),
+            workingDirectory: defaultWorkingDirectory,
+            executable: "",
+            arguments: [],
+            url: url?.absoluteString,
+            workspaceID: activeWorkspaceID
+        )
+        add(spec: spec, start: true, select: true)
+        reveal(spec.worldFrame)
+        if url == nil {
+            contents[spec.id]?.beginEditing()
+        }
+        return spec.id
+    }
+
     /// Finds a spot for a new node that does not sit on top of an existing one.
     ///
     /// Nodes are tiled horizontally: anything whose vertical band overlaps the
@@ -767,6 +798,15 @@ final class CanvasController: NSObject {
             label.onTextChange = { [weak self] value in
                 guard let self else { return }
                 self.specs[id]?.text = value
+                self.persist()
+            }
+        }
+
+        // A browser node's current URL is its payload too.
+        if let browser = content as? BrowserContent {
+            browser.onURLChange = { [weak self] url in
+                guard let self else { return }
+                self.specs[id]?.url = url.absoluteString
                 self.persist()
             }
         }
@@ -1100,6 +1140,11 @@ extension CanvasController: CanvasViewDelegate {
         createImageNode(contentsOf: url, at: point) != nil
     }
 
+    func canvasView(_ canvas: CanvasView, didReceiveLinkDropOf url: URL, atWorldPoint point: CGPoint) -> Bool {
+        createBrowserNode(url: url, at: point)
+        return true
+    }
+
     func canvasView(_ canvas: CanvasView, didRequestTextNodeAt point: CGPoint) {
         createTextNode(at: point)
     }
@@ -1110,10 +1155,12 @@ extension CanvasController: CanvasViewDelegate {
             createTextNode(at: point)
         case .note:
             createNoteNode(at: point)
+        case .browser:
+            createBrowserNode(at: point)
         case .shell, .pi:
             newNode(kind: kind, at: point)
-        case .image, .browser:
-            // Image files come through the picker; the browser does not exist yet.
+        case .image:
+            // Image files come through the picker.
             break
         }
     }
@@ -1123,13 +1170,25 @@ extension CanvasController: CanvasViewDelegate {
     }
 
     func canvasView(_ canvas: CanvasView, nodeID: UUID, didReceiveDropFrom sourceNodeID: UUID) -> Bool {
-        // Only a pi node has an agent to hand the path to, and only an image
-        // node produces one.
+        // Only a pi node has an agent to hand something to: an image node
+        // contributes its asset path, a browser node its URL.
         guard let target = specs[nodeID], target.kind == .pi,
-              let source = specs[sourceNodeID], source.kind == .image,
-              let asset = source.asset,
+              let source = specs[sourceNodeID],
               let content = contents[nodeID] else { return false }
-        content.send(text: assetStore.url(for: asset).path + "\n")
+
+        let text: String
+        switch source.kind {
+        case .image:
+            guard let asset = source.asset else { return false }
+            text = assetStore.url(for: asset).path
+        case .browser:
+            guard let url = source.url else { return false }
+            text = url
+        default:
+            return false
+        }
+
+        content.send(text: text + "\n")
         focusNode(id: nodeID)
         return true
     }

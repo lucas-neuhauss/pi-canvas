@@ -145,6 +145,7 @@ enum SelfTest {
         testTextNodes(checker: checker)
         testContextMenu(checker: checker)
         testNoteNodes(checker: checker)
+        testBrowserNodes(checker: checker)
         testPiSessionBinding(checker: checker)
         testAgentStatusWatcher(checker: checker)
         testGhosttyConfig(checker: checker)
@@ -941,7 +942,7 @@ enum SelfTest {
         }
         checker.equal(
             menu.items.filter { !$0.isSeparatorItem }.map(\.title),
-            ["New Terminal", "New pi Agent", "New Text Label", "New Note", "Add Image…"],
+            ["New Terminal", "New pi Agent", "New Text Label", "New Note", "New Browser", "Add Image…"],
             "the context menu lists every way to make a node"
         )
 
@@ -996,6 +997,21 @@ enum SelfTest {
             }
         } else {
             checker.check(false, "the context menu offers New Note")
+        }
+
+        // "New Browser" makes an (initially blank) browser node.
+        let browserPoint = CGPoint(x: 700, y: 200)
+        if let fourthClick = mouseEvent(.rightMouseDown, at: browserPoint, in: canvas),
+           let fourthMenu = canvas.menu(for: fourthClick),
+           let index = fourthMenu.items.firstIndex(where: { $0.title == "New Browser" }) {
+            fourthMenu.performActionForItem(at: index)
+            if let browserNode = canvas.nodeViews.last {
+                checker.equal(controller.specs[browserNode.nodeID]?.kind, .browser, "the browser item makes a browser")
+            } else {
+                checker.check(false, "the browser item made a node")
+            }
+        } else {
+            checker.check(false, "the context menu offers New Browser")
         }
 
         // Right-clicking a node is the node's business, not the canvas's.
@@ -1176,6 +1192,158 @@ enum SelfTest {
         // Closing the node takes its file with it.
         controller2.close(nodeID: first)
         checker.check(!FileManager.default.fileExists(atPath: firstURL.path), "closing the note removes its file")
+
+        window2.close()
+        window.close()
+        try? FileManager.default.removeItem(at: directory)
+    }
+
+    /// The browser journey: parse an address, load a page offline, persist the
+    /// URL, and hand it to an agent.
+    private static func testBrowserNodes(checker: Checker) {
+        print("\nbrowser nodes")
+
+        // Address parsing: bare hosts, local dev servers, and explicit schemes.
+        checker.equal(
+            BrowserContent.normalizedURL(from: "example.com")?.absoluteString,
+            "https://example.com",
+            "a bare host becomes https"
+        )
+        checker.equal(
+            BrowserContent.normalizedURL(from: "localhost:3000")?.absoluteString,
+            "http://localhost:3000",
+            "a local dev server becomes http"
+        )
+        checker.equal(
+            BrowserContent.normalizedURL(from: "http://example.com/x")?.absoluteString,
+            "http://example.com/x",
+            "an explicit scheme is kept"
+        )
+        checker.check(BrowserContent.normalizedURL(from: "   ") == nil, "an empty address is not a URL")
+
+        let canvasFrame = CGRect(x: 0, y: 0, width: 1400, height: 900)
+        let canvas = CanvasView(frame: canvasFrame)
+        let window = NSWindow(contentRect: canvasFrame, styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentView = canvas
+        window.makeKeyAndOrderFront(nil)
+
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("picanvas-browser-\(UUID().uuidString)")
+        let stores = tempStores(in: directory)
+        let workspaceStore = WorkspaceStore(
+            directory: directory.appendingPathComponent("workspaces"),
+            legacyLayoutURL: directory.appendingPathComponent("layout.json")
+        )
+        let controller = CanvasController(
+            canvas: canvas,
+            workspaceStore: workspaceStore,
+            scrollbackStore: stores.scrollback,
+            assetStore: stores.assets,
+            noteStore: stores.notes
+        )
+        // Real browser content; a recording stand-in for the pi node it will
+        // hand its URL to.
+        var browsers: [UUID: BrowserContent] = [:]
+        let recorder = ContentRecorder()
+        controller.contentFactory = { spec, stores in
+            if spec.kind == .browser {
+                let content = NodeContentFactory.make(spec: spec, stores: stores)
+                browsers[spec.id] = content as? BrowserContent
+                return content
+            }
+            return recorder.make(spec)
+        }
+        canvas.setViewport(zoom: 1, pan: .zero, notify: false)
+
+        // Create with a data URL so loading needs no network.
+        let fixture = URL(string: "data:text/html,<title>Fixture Page</title><h1>Hello</h1>")!
+        let node = controller.createBrowserNode(url: fixture)
+        guard let spec = controller.specs[node], let browser = browsers[node] else {
+            checker.check(false, "a browser node was created")
+            window.close()
+            return
+        }
+        checker.equal(spec.kind, .browser, "the node is a browser")
+        checker.equal(spec.url, fixture.absoluteString, "the URL is on the spec")
+        checker.check(
+            waitUntil(timeout: 10) { browser.pageTitle == "Fixture Page" },
+            "the page loads (title \(browser.pageTitle ?? "none"))"
+        )
+        checker.equal(canvas.nodeView(withID: node)?.title, "Fixture Page", "the page title titles the node")
+
+        // Navigating updates the URL the node remembers.
+        let second = URL(string: "data:text/html,<title>Second Page</title><h1>Two</h1>")!
+        browser.load(second)
+        checker.check(
+            waitUntil(timeout: 10) { controller.specs[node]?.url == second.absoluteString },
+            "a navigation updates the persisted URL"
+        )
+
+        // Dropping the browser onto a pi node sends the URL, like an image's path.
+        controller.newNode(kind: .pi)
+        guard let piID = canvas.focusedNodeID,
+              let piNode = canvas.nodeView(withID: piID),
+              let piContent = recorder.content(for: piID) else {
+            checker.check(false, "a pi node exists to drop onto")
+            window.close()
+            return
+        }
+        let dragPasteboard = NSPasteboard(name: NSPasteboard.Name("picanvas-browser-drag-\(UUID().uuidString)"))
+        dragPasteboard.clearContents()
+        let dragItem = NSPasteboardItem()
+        dragItem.setString(node.uuidString, forType: NodeDragPasteboard.type)
+        dragPasteboard.writeObjects([dragItem])
+        checker.check(piNode.acceptNodeDrop(dragPasteboard), "the browser drop is accepted by a pi node")
+        checker.equal(piContent.sentText, [second.absoluteString + "\n"], "the URL lands in the terminal")
+
+        // Dropping a link from a browser onto empty canvas makes a browser node.
+        let linkPasteboard = NSPasteboard(name: NSPasteboard.Name("picanvas-link-drop-\(UUID().uuidString)"))
+        linkPasteboard.clearContents()
+        linkPasteboard.writeObjects([URL(string: "https://example.com/docs")! as NSURL])
+        checker.check(canvas.droppedWebURL(from: linkPasteboard) != nil, "an http link is recognised")
+        checker.check(
+            canvas.handleWebURLDrop(pasteboard: linkPasteboard, canvasPoint: CGPoint(x: 900, y: 700)),
+            "dropping a link on the canvas makes a node"
+        )
+        if let droppedNode = canvas.nodeViews.last {
+            checker.equal(controller.specs[droppedNode.nodeID]?.kind, .browser, "the dropped link makes a browser")
+            checker.equal(controller.specs[droppedNode.nodeID]?.url, "https://example.com/docs", "with the dropped URL")
+        } else {
+            checker.check(false, "the dropped link made a node")
+        }
+
+        // Restart: the URL comes back and the page reloads.
+        controller.saveNow()
+        let canvas2 = CanvasView(frame: canvasFrame)
+        let window2 = NSWindow(contentRect: canvasFrame, styleMask: [.titled], backing: .buffered, defer: false)
+        window2.contentView = canvas2
+        window2.makeKeyAndOrderFront(nil)
+        let controller2 = CanvasController(
+            canvas: canvas2,
+            workspaceStore: workspaceStore,
+            scrollbackStore: stores.scrollback,
+            assetStore: stores.assets,
+            noteStore: stores.notes
+        )
+        var restored: [UUID: BrowserContent] = [:]
+        controller2.contentFactory = { spec, stores in
+            let content = NodeContentFactory.make(spec: spec, stores: stores)
+            restored[spec.id] = content as? BrowserContent
+            return content
+        }
+        controller2.restore()
+        checker.equal(controller2.specs[node]?.url, second.absoluteString, "the URL comes back after relaunch")
+        guard let restoredBrowser = restored[node] else {
+            checker.check(false, "the browser content comes back")
+            window2.close()
+            window.close()
+            try? FileManager.default.removeItem(at: directory)
+            return
+        }
+        checker.check(
+            waitUntil(timeout: 10) { restoredBrowser.pageTitle == "Second Page" },
+            "and the page reloads (title \(restoredBrowser.pageTitle ?? "none"))"
+        )
 
         window2.close()
         window.close()
