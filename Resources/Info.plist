@@ -24,6 +24,16 @@
 	<string>public.app-category.developer-tools</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>14.0</string>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<!-- Browser nodes are for docs, dev servers and dashboards, which are
+		     routinely plain http on a local host. ATS stays on for everything
+		     else; only web content is relaxed. -->
+		<key>NSAllowsArbitraryLoadsInWebContent</key>
+		<true/>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
 	<key>NSHighResolutionCapable</key>
 	<true/>
 	<key>NSPrincipalClass</key>

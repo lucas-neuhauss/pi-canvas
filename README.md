@@ -135,7 +135,9 @@ need a real browser (video, heavy auth) are allowed to be the wrong tool.
 
 The page is inspectable from **Safari's Develop menu** (web views appear there
 when Safari's developer features are enabled), so debugging stays in the real
-tool instead of becoming app UI.
+tool instead of becoming app UI. Debug builds are signed with
+`get-task-allow` for exactly that. Plain-http pages load too: App Transport
+Security is relaxed for web content only, since dev servers are the point.
 
 ## Keyboard
 

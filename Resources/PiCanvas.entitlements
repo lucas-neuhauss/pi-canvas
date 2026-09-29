@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Debug builds are signed for local debugging so WebKit exposes the
+	     browser nodes to Safari's Web Inspector. Release builds skip this:
+	     it permits a debugger to attach to the process. -->
+	<key>com.apple.security.get-task-allow</key>
+	<true/>
+</dict>
+</plist>
