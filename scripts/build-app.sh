@@ -77,7 +77,13 @@ swiftc \
 	-o "$MACOS_DIR/$APP_NAME"
 
 if command -v codesign >/dev/null 2>&1; then
-	codesign --force --sign - --timestamp=none "$APP_DIR" >/dev/null 2>&1 || true
+	SIGN_ARGS=(--force --sign - --timestamp=none)
+	# Debug builds carry get-task-allow so WebKit exposes browser nodes to
+	# Safari's Web Inspector. Release builds stay entitlement-free.
+	if [[ "$CONFIG" == "debug" && -f "$ROOT/Resources/PiCanvas.entitlements" ]]; then
+		SIGN_ARGS+=(--entitlements "$ROOT/Resources/PiCanvas.entitlements")
+	fi
+	codesign "${SIGN_ARGS[@]}" "$APP_DIR" >/dev/null 2>&1 || true
 fi
 
 echo "==> built $APP_DIR"
